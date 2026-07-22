@@ -1,0 +1,1 @@
+{"query_id":"ACME_revenue_2023","ticker":"ACME","kpi":"revenue","year":2023,"unit_class":"monetary","report_name":"NYSE_ACME_2023","model":"fixture","status":"ok","found":true,"value":1234000000,"value_verbatim":"1,234","unit_scale":"millions","page":3}

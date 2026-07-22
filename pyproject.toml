@@ -1,0 +1,43 @@
+[project]
+name = "finground"
+version = "0.1.0"
+description = "Agentic retrieval and structured extraction of financial documents"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "google-adk>=1.0,<2",
+    "litellm>=1.83.7,<=1.83.14",
+    "pyarrow>=25,<26",
+    "pydantic>=2.11,<3",
+]
+
+[project.scripts]
+finground = "finground.benchmark.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9",
+    "ruff>=0.11,<1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["finground"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "BLE", "C4", "SIM", "PERF", "RUF", "ASYNC"]
+ignore = [
+    "ASYNC240", # Small local filesystem writes are intentionally synchronous.
+    "E501",     # Ruff formatter cannot wrap long financial catalogue strings.
+    "RUF001",   # Unicode minus variants are intentional normalization inputs.
+]

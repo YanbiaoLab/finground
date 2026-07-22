@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# IDE and local configuration
+.idea/
+.env
+.env.*
+!.env.example
+!.env.template
+
+# FinGround benchmark outputs and caches
+data/
+outputs/
+.finground-cache/

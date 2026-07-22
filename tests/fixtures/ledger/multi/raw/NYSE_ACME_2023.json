@@ -1,0 +1,16 @@
+{
+  "ticker": "ACME",
+  "year": 2023,
+  "exchange": "NYSE",
+  "report_name": "NYSE_ACME_2023",
+  "model": "fixture",
+  "status": "ok",
+  "extraction": {
+    "ticker": "ACME",
+    "reporting_currency": "USD",
+    "units_note": "Consolidated statement reports values in millions.",
+    "kpis": [
+      {"kpi": "revenue", "fiscal_year": 2023, "value": 1234000000}
+    ]
+  }
+}
