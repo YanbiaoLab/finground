@@ -160,6 +160,25 @@ def test_internal_multi_scorer_reads_ground_truth_from_parquet(tmp_path: Path) -
     assert "1.0000" in summary
 
 
+def test_internal_multi_scorer_scores_incomplete_partial_predictions(tmp_path: Path) -> None:
+    predictions = tmp_path / "predictions"
+    raw_dir = predictions / "raw"
+    raw_dir.mkdir(parents=True)
+    source = json.loads(
+        (FIXTURE / "multi" / "raw" / "NYSE_ACME_2023.json").read_text()
+    )
+    source["status"] = "incomplete"
+    (raw_dir / "NYSE_ACME_2023.json").write_text(json.dumps(source))
+    _write_multi_scope(predictions)
+    parquet_path = tmp_path / "multi.parquet"
+    _write_multi_ground_truth(parquet_path)
+
+    result = score_multi_kpi(output_dir=predictions, parquet_path=parquet_path)
+
+    assert result["recall"] == 1.0
+    assert "incomplete=1" in (predictions / "summary.md").read_text()
+
+
 def test_internal_multi_scorer_accepts_submission_tool_output(tmp_path: Path) -> None:
     report_path = FIXTURE / "report.mmd"
     report = Report("NYSE_ACME_2023", "NYSE", "ACME", 2023, report_path.read_text())
@@ -183,7 +202,12 @@ def test_internal_multi_scorer_accepts_submission_tool_output(tmp_path: Path) ->
                 "line_label": "Revenue",
                 "year_label": "2023",
                 "scope": "consolidated total company",
-            }
+            },
+            *[
+                {"kpi": kpi, "fiscal_year": 2023, "status": "absent"}
+                for kpi in KPI_KEYS
+                if kpi != "revenue"
+            ],
         ],
         context,
     )

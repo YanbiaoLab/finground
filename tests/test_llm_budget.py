@@ -30,7 +30,7 @@ def test_multi_kpi_budget_plugin_adds_supplemental_messages_at_thresholds() -> N
     assert "80% USED" in final_message
     assert 'query_multi_kpi_progress(view="kpis")' in final_message
     assert "next model call must call submit_multi_kpi_extraction" in final_message
-    assert "Never use an empty extraction" in final_message
+    assert "persisted as incomplete" in final_message
 
 
 def test_multi_kpi_budget_plugin_rounds_thresholds_up() -> None:

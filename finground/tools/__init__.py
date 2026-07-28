@@ -8,6 +8,7 @@ from .report import (
     search_report,
 )
 from .submission import (
+    MULTI_KPI_ALLOW_PARTIAL_STATE_KEY,
     MULTI_KPI_AUDIT_STATE_KEY,
     MULTI_KPI_RESULT_STATE_KEY,
     MULTI_KPI_WORK_RECORD_STATE_KEY,
@@ -22,6 +23,7 @@ from .submission import (
 )
 
 __all__ = [
+    "MULTI_KPI_ALLOW_PARTIAL_STATE_KEY",
     "MULTI_KPI_AUDIT_STATE_KEY",
     "MULTI_KPI_RESULT_STATE_KEY",
     "MULTI_KPI_WORK_RECORD_STATE_KEY",

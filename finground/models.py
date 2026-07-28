@@ -19,7 +19,12 @@ UnitScale = Literal[
 MultiKpiRecordView = Literal["all", "kpis", "notes"]
 MultiKpiNoteCategory = Literal["evidence", "unit", "scope", "decision", "todo", "warning"]
 MultiKpiEvidenceStatus = Literal["found", "explicit_zero", "absent", "ambiguous"]
-MultiKpiSignRule = Literal["as_reported", "positive_outflow", "explicit_zero"]
+MultiKpiSignRule = Literal[
+    "as_reported",
+    "positive_outflow",
+    "positive_magnitude",
+    "explicit_zero",
+]
 
 KpiKey = Literal[
     "revenue",

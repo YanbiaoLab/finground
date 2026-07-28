@@ -40,7 +40,14 @@ KPI_KEYS = tuple(KPI_DESCRIPTIONS)
 
 
 KPI_ALIASES: dict[str, tuple[str, ...]] = {
-    "revenue": ("revenue", "revenues", "net sales", "sales"),
+    "revenue": (
+        "revenue",
+        "revenues",
+        "net revenue",
+        "total net revenue",
+        "net sales",
+        "sales",
+    ),
     "cost_of_revenue": (
         "cost of revenue",
         "cost of revenues",
@@ -51,15 +58,27 @@ KPI_ALIASES: dict[str, tuple[str, ...]] = {
     "rd_expense": ("research and development", "r&d"),
     "sga_expense": ("selling general and administrative", "sg&a"),
     "operating_income": ("operating income", "operating profit", "income from operations"),
-    "interest_expense": ("interest expense",),
-    "income_tax_expense": ("income tax expense", "provision for income taxes"),
+    "interest_expense": ("interest expense", "finance costs", "finance expense"),
+    "income_tax_expense": (
+        "income tax expense",
+        "income tax benefit",
+        "provision for income taxes",
+    ),
     "net_income": ("net income attributable", "net income", "profit attributable"),
     "eps_basic": ("basic earnings per share", "basic eps"),
     "eps_diluted": ("diluted earnings per share", "diluted eps"),
     "total_assets": ("total assets",),
     "total_liabilities": ("total liabilities",),
-    "stockholders_equity": ("stockholders equity", "shareholders equity"),
-    "stockholders_equity_incl_nci": ("total equity", "equity including noncontrolling"),
+    "stockholders_equity": (
+        "stockholders equity",
+        "shareholders equity",
+        "equity attributable to owners",
+    ),
+    "stockholders_equity_incl_nci": (
+        "total equity",
+        "equity including noncontrolling",
+        "equity attributable to owners and non-controlling interests",
+    ),
     "cash_and_equivalents": ("cash and cash equivalents",),
     "cash_incl_restricted": ("cash cash equivalents and restricted cash",),
     "long_term_debt_total": ("total long term debt", "long term debt including current"),
@@ -67,25 +86,64 @@ KPI_ALIASES: dict[str, tuple[str, ...]] = {
     "long_term_debt_current": ("current portion of long term debt",),
     "short_term_borrowings": ("short term borrowings", "short term debt"),
     "inventory": ("inventory", "inventories"),
-    "accounts_receivable": ("accounts receivable", "trade receivables"),
-    "accounts_payable": ("accounts payable", "trade payables"),
-    "shares_outstanding": ("shares outstanding", "common shares outstanding"),
-    "operating_cash_flow": ("net cash provided by operating activities", "operating cash flow"),
-    "investing_cash_flow": ("net cash used in investing activities", "investing cash flow"),
-    "financing_cash_flow": ("net cash provided by financing activities", "financing cash flow"),
+    "accounts_receivable": (
+        "accounts receivable",
+        "trade receivables",
+        "trade and other receivables",
+    ),
+    "accounts_payable": (
+        "accounts payable",
+        "trade payables",
+        "trade and other payables",
+    ),
+    "shares_outstanding": (
+        "shares outstanding",
+        "common shares outstanding",
+        "ordinary shares outstanding",
+        "issued and fully paid",
+    ),
+    "operating_cash_flow": (
+        "net cash provided by operating activities",
+        "net cash used in operating activities",
+        "net cash from operating activities",
+        "operating cash flow",
+    ),
+    "investing_cash_flow": (
+        "net cash provided by investing activities",
+        "net cash used in investing activities",
+        "net cash from investing activities",
+        "investing cash flow",
+    ),
+    "financing_cash_flow": (
+        "net cash provided by financing activities",
+        "net cash used in financing activities",
+        "net cash from financing activities",
+        "financing cash flow",
+    ),
     "capex": (
         "capital expenditures",
         "purchases of property plant and equipment",
+        "payments for property plant and equipment",
+        "investments in property plant and equipment",
         "purchase of ppe",
     ),
-    "depreciation_amortization": ("depreciation and amortization", "depreciation amortization"),
-    "dividends_paid": ("dividends paid", "payment of dividends"),
+    "depreciation_amortization": (
+        "depreciation and amortization",
+        "depreciation and amortisation",
+        "depreciation amortization",
+    ),
+    "dividends_paid": (
+        "dividends paid",
+        "payment of dividends",
+        "dividends paid to shareholders",
+    ),
 }
 
 
 PER_SHARE_KPIS = {"eps_basic", "eps_diluted"}
 SHARE_COUNT_KPIS = {"shares_outstanding"}
 POSITIVE_OUTFLOW_KPIS = {"capex", "dividends_paid"}
+POSITIVE_MAGNITUDE_KPIS = POSITIVE_OUTFLOW_KPIS | {"interest_expense"}
 
 
 def parse_query_id(query_id: str) -> tuple[str, str, int]:

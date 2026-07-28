@@ -6,7 +6,13 @@ from google.adk.models.lite_llm import LiteLlm
 
 import finground.agent as agent_module
 from finground.agent import (
+    MULTI_KPI_COMPACTION_TOKEN_THRESHOLD,
+    MULTI_KPI_CONTEXT_WINDOW_TOKENS,
+    MULTI_KPI_FINAL_WARNING_CALL,
     MULTI_KPI_LLM_CALL_LIMIT,
+    MULTI_KPI_MAX_OUTPUT_TOKENS,
+    MULTI_KPI_PROGRESS_REMINDER_CALL,
+    MULTI_KPI_SUBMISSION_DEADLINE,
     create_adk_model,
     create_multi_kpi_agent,
     create_multi_kpi_app,
@@ -37,10 +43,10 @@ def test_default_model_is_qwen36_27b_fp8(monkeypatch) -> None:
     assert load_settings().model == "qwen36-27b-fp8"
 
 
-def test_default_vllm_endpoint_is_local(monkeypatch) -> None:
+def test_default_vllm_endpoint_is_remote(monkeypatch) -> None:
     monkeypatch.delenv("FINGROUND_VLLM_BASE_URL", raising=False)
 
-    assert load_settings().vllm_base_url == "http://localhost:8000/v1"
+    assert load_settings().vllm_base_url == "http://60.171.65.125:30845/v1"
 
 
 def test_deepseek_model_uses_litellm_provider_prefix() -> None:
@@ -78,6 +84,9 @@ def test_qwen_model_uses_local_vllm_openai_compatible_endpoint(monkeypatch) -> N
         "api_base": "http://vllm.test:8000/v1",
         "api_key": "test-key",
         "drop_params": True,
+        "tool_choice": "required",
+        "parallel_tool_calls": False,
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
     }
 
 
@@ -114,11 +123,17 @@ def test_multi_kpi_agent_exposes_state_and_submission_tools() -> None:
         "submit_multi_kpi_extraction",
     }
     assert "correct every" in agent.instruction
-    assert MULTI_KPI_LLM_CALL_LIMIT == 30
-    assert "At model call 18" in agent.instruction
-    assert "At call 24" in agent.instruction
-    assert "Call 25 is restricted" in agent.instruction
+    assert MULTI_KPI_LLM_CALL_LIMIT == 50
+    assert f"At model call {MULTI_KPI_PROGRESS_REMINDER_CALL}" in agent.instruction
+    assert f"At call {MULTI_KPI_FINAL_WARNING_CALL}" in agent.instruction
+    assert f"Call {MULTI_KPI_SUBMISSION_DEADLINE} is restricted" in agent.instruction
     assert "Missing means omitting" in agent.instruction
+    assert "report fiscal year only" in agent.instruction
+    assert "more than 8 KPI rows" in agent.instruction
+    assert "all 31 KPI keys have a coverage status" in agent.instruction
+    assert "exactly one tool call" in agent.instruction
+    assert MULTI_KPI_MAX_OUTPUT_TOKENS == 4_096
+    assert agent.generate_content_config.max_output_tokens == 4_096
     function_config = agent.generate_content_config.tool_config.function_calling_config
     assert function_config.mode == "ANY"
     record_tool = next(
@@ -134,6 +149,9 @@ def test_multi_kpi_agent_exposes_state_and_submission_tools() -> None:
         "ambiguous",
     ]
     assert "value" not in evidence_schema["properties"]
+    assert record_tool._get_declaration().parameters_json_schema["properties"]["kpis"][
+        "maxItems"
+    ] == 8
 
 
 def test_multi_kpi_app_enables_adk_context_filter_and_compaction() -> None:
@@ -143,5 +161,7 @@ def test_multi_kpi_app_enables_adk_context_filter_and_compaction() -> None:
     assert len(app.plugins) == 1
     assert app.plugins[0].name == "context_filter_plugin"
     assert app.events_compaction_config is not None
-    assert app.events_compaction_config.token_threshold == 18_000
+    assert MULTI_KPI_CONTEXT_WINDOW_TOKENS == 131_072
+    assert MULTI_KPI_COMPACTION_TOKEN_THRESHOLD == 98_304
+    assert app.events_compaction_config.token_threshold == 98_304
     assert app.events_compaction_config.event_retention_size == 6

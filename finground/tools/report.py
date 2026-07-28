@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from html import unescape
 from typing import Any
 
 from google.adk.tools import ToolContext
@@ -19,6 +20,67 @@ MAX_FOCUSED_TEXT_CHARS = 12_000
 FOCUS_CONTEXT_LINES = 4
 HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.MULTILINE)
 REPORT_STATE_KEY = "report"
+STATEMENT_HEADING_TERMS = {
+    "income_statement": (
+        "consolidated statement of operations",
+        "consolidated statements of operations",
+        "consolidated statement of income",
+        "consolidated statements of income",
+        "consolidated income statement",
+        "consolidated statements of earnings",
+        "consolidated statement of profit or loss",
+        "consolidated statement of comprehensive income",
+        "statement of profit or loss",
+        "statement of comprehensive income",
+    ),
+    "balance_sheet": (
+        "consolidated balance sheet",
+        "consolidated balance sheets",
+        "statement of financial position",
+        "statements of financial position",
+    ),
+    "cash_flow_statement": (
+        "statement of cash flows",
+        "statements of cash flows",
+        "cash flow statement",
+        "cash flow statements",
+    ),
+}
+STATEMENT_STRUCTURE_TERMS = {
+    "income_statement": (
+        "revenue",
+        "cost of",
+        "operating income",
+        "income from operations",
+        "profit before",
+        "income before",
+        "net income",
+        "profit for the year",
+        "basic",
+        "diluted",
+    ),
+    "balance_sheet": (
+        "current assets",
+        "total assets",
+        "current liabilities",
+        "total liabilities",
+        "total equity",
+        "cash and cash equivalents",
+    ),
+    "cash_flow_statement": (
+        "cash flows from operating activities",
+        "cash flows from investing activities",
+        "cash flows from financing activities",
+        "net cash provided by operating activities",
+        "net cash used in operating activities",
+        "net cash from operating activities",
+    ),
+}
+STATEMENT_STRUCTURE_THRESHOLDS = {
+    "income_statement": 3,
+    "balance_sheet": 4,
+    "cash_flow_statement": 2,
+}
 
 
 def _argument_error(field: str, message: str) -> dict:
@@ -113,19 +175,79 @@ def report_from_state(
     return report, pages, None
 
 
+def _normalized_text(text: str) -> str:
+    visible_text = re.sub(r"<[^>]+>", " ", unescape(text))
+    return " ".join(visible_text.casefold().split())
+
+
+def _has_statement_title(page_text: str, terms: tuple[str, ...]) -> bool:
+    table_start = page_text.casefold().find("<table")
+    title_end = table_start if 0 <= table_start <= 2_000 else 1_200
+    for line in page_text[:title_end].splitlines():
+        normalized_line = _normalized_text(line).lstrip("# ")
+        if any(
+            normalized_line == term
+            or (
+                normalized_line.startswith(term)
+                and len(normalized_line) <= len(term) + 80
+            )
+            for term in terms
+        ):
+            return True
+    return False
+
+
+def _classified_statement_pages(pages: list[Page]) -> dict[str, list[int]]:
+    candidates: dict[str, list[tuple[int, int]]] = {
+        statement: [] for statement in STATEMENT_HEADING_TERMS
+    }
+    for page in pages:
+        headings = HEADING_RE.findall(page.text)
+        first_heading = headings[0].casefold() if headings else ""
+        is_secondary_section = first_heading.startswith(
+            ("note ", "notes ", "independent auditor", "directors")
+        )
+        page_text = _normalized_text(page.text)
+        has_table = "<table" in page.text.casefold() or "|" in page.text
+        for statement, title_terms in STATEMENT_HEADING_TERMS.items():
+            title_match = (
+                not is_secondary_section
+                and has_table
+                and _has_statement_title(page.text, title_terms)
+            )
+            structure_score = sum(
+                term in page_text for term in STATEMENT_STRUCTURE_TERMS[statement]
+            )
+            if title_match or (
+                has_table
+                and structure_score >= STATEMENT_STRUCTURE_THRESHOLDS[statement]
+            ):
+                candidates[statement].append(
+                    (
+                        (20 if title_match else 0) + structure_score,
+                        page.display_number,
+                    )
+                )
+    return {
+        statement: [
+            page
+            for _score, page in sorted(items, key=lambda item: (-item[0], item[1]))[:1]
+        ]
+        for statement, items in candidates.items()
+    }
+
+
 def get_report_info(tool_context: ToolContext) -> dict:
-    """Return report metadata, page range, and a bounded heading outline."""
+    """Return report metadata, a heading outline, and classified primary-statement pages."""
     report, pages, error = report_from_state(tool_context)
     if error is not None:
         return error
     assert report is not None and pages is not None
     outline = []
     for page in pages:
-        match = HEADING_RE.search(page.text)
-        if match:
-            outline.append({"page": page.display_number, "heading": match.group(1)[:160]})
-            if len(outline) >= MAX_OUTLINE_ITEMS:
-                break
+        headings = HEADING_RE.findall(page.text)
+        if headings and len(outline) < MAX_OUTLINE_ITEMS:
+            outline.append({"page": page.display_number, "heading": headings[0][:160]})
     return {
         "status": "success",
         "report_id": report.get("report_id"),
@@ -138,6 +260,7 @@ def get_report_info(tool_context: ToolContext) -> dict:
             "last": pages[-1].display_number,
         },
         "outline": outline,
+        "statement_pages": _classified_statement_pages(pages),
     }
 
 

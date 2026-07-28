@@ -10,6 +10,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from google.adk.agents.invocation_context import LlmCallsLimitExceededError
 from google.adk.agents.run_config import RunConfig
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
@@ -19,8 +20,10 @@ from finground.agent import (
     MULTI_KPI_APP_NAME,
     MULTI_KPI_COMPACTION_EVENT_RETENTION,
     MULTI_KPI_COMPACTION_TOKEN_THRESHOLD,
+    MULTI_KPI_CONTEXT_WINDOW_TOKENS,
     MULTI_KPI_FINAL_WARNING_CALL,
     MULTI_KPI_LLM_CALL_LIMIT,
+    MULTI_KPI_MAX_OUTPUT_TOKENS,
     MULTI_KPI_PROGRESS_REMINDER_CALL,
     MULTI_KPI_PROMPT_VERSION,
     MULTI_KPI_SUBMISSION_DEADLINE,
@@ -32,9 +35,11 @@ from finground.benchmark.llm_budget import MultiKpiExecutionGuardPlugin
 from finground.benchmark.llm_metrics import LlmCallCounterPlugin
 from finground.benchmark.parquet import iter_multi_reports
 from finground.documents import Report
+from finground.kpis import KPI_KEYS
 from finground.tools import (
     MULTI_KPI_AUDIT_STATE_KEY,
     MULTI_KPI_RESULT_STATE_KEY,
+    MULTI_KPI_WORK_RECORD_STATE_KEY,
     REPORT_STATE_KEY,
     build_report_state,
 )
@@ -57,7 +62,12 @@ def _existing_ok(path: Path) -> bool:
     if not path.is_file():
         return False
     try:
-        return json.loads(path.read_text(encoding="utf-8")).get("status") == "ok"
+        record = json.loads(path.read_text(encoding="utf-8"))
+        return (
+            record.get("status") == "ok"
+            and record.get("model") == SETTINGS.model
+            and record.get("prompt_version") == MULTI_KPI_PROMPT_VERSION
+        )
     except (OSError, json.JSONDecodeError):
         return False
 
@@ -69,6 +79,23 @@ def _load_report_filter(path: Path | None) -> set[str] | None:
         line.strip()
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
+    }
+
+
+def _build_partial_extraction(audit: dict) -> dict:
+    return {
+        "ticker": audit.get("ticker"),
+        "reporting_currency": audit.get("reporting_currency"),
+        "units_note": audit.get("units_note"),
+        "kpis": [
+            {
+                "kpi": item.get("kpi"),
+                "fiscal_year": item.get("fiscal_year"),
+                "value": item.get("value"),
+            }
+            for item in audit.get("kpis", [])
+            if item.get("status") in {"found", "explicit_zero"}
+        ],
     }
 
 
@@ -99,13 +126,17 @@ async def _run_report(
         "submit_multi_kpi_extraction."
     )
     message = types.Content(role="user", parts=[types.Part.from_text(text=prompt)])
-    async for _event in runner.run_async(
-        user_id=user_id,
-        session_id=session_id,
-        new_message=message,
-        run_config=RunConfig(max_llm_calls=MULTI_KPI_LLM_CALL_LIMIT),
-    ):
-        pass
+    limit_error: LlmCallsLimitExceededError | None = None
+    try:
+        async for _event in runner.run_async(
+            user_id=user_id,
+            session_id=session_id,
+            new_message=message,
+            run_config=RunConfig(max_llm_calls=MULTI_KPI_SUBMISSION_DEADLINE),
+        ):
+            pass
+    except LlmCallsLimitExceededError as error:
+        limit_error = error
 
     session = await session_service.get_session(
         app_name=app_name,
@@ -113,8 +144,17 @@ async def _run_report(
         session_id=session_id,
     )
     extraction = session.state.get(MULTI_KPI_RESULT_STATE_KEY) if session is not None else None
-    audit = session.state.get(MULTI_KPI_AUDIT_STATE_KEY) if session is not None else None
+    audit = (
+        session.state.get(MULTI_KPI_AUDIT_STATE_KEY)
+        or session.state.get(MULTI_KPI_WORK_RECORD_STATE_KEY)
+        if session is not None
+        else None
+    )
+    if not isinstance(extraction, dict) and isinstance(audit, dict):
+        extraction = _build_partial_extraction(audit)
     if not isinstance(extraction, dict):
+        if limit_error is not None:
+            raise limit_error
         raise RuntimeError("agent stopped without a successful multi-KPI submission")
     if not isinstance(audit, dict):
         raise RuntimeError("agent stopped without a validated multi-KPI evidence record")
@@ -156,6 +196,13 @@ async def _process_report(report: Report) -> tuple[Report, dict]:
     execution_guard = MultiKpiExecutionGuardPlugin(max_calls=MULTI_KPI_LLM_CALL_LIMIT)
     try:
         extraction, audit = await _run_report(report, llm_counter, execution_guard)
+        covered = {
+            item.get("kpi")
+            for item in audit.get("kpis", [])
+            if item.get("fiscal_year") == report.year
+        }
+        pending_kpis = [kpi for kpi in KPI_KEYS if kpi not in covered]
+        complete = not pending_kpis
         record = {
             "ticker": report.ticker,
             "year": report.year,
@@ -163,10 +210,16 @@ async def _process_report(report: Report) -> tuple[Report, dict]:
             "report_name": report.report_id,
             "model": SETTINGS.model,
             "prompt_version": MULTI_KPI_PROMPT_VERSION,
-            "status": "ok",
+            "status": "ok" if complete else "incomplete",
             "extraction": extraction,
             "audit": audit,
-            "error": None,
+            "error": (
+                None
+                if complete
+                else f"incomplete KPI coverage: {len(pending_kpis)} pending"
+            ),
+            "coverage_count": len(KPI_KEYS) - len(pending_kpis),
+            "pending_kpis": pending_kpis,
             "llm_calls": llm_counter.count,
             "prevented_early_stops": execution_guard.prevented_early_stops,
             "elapsed_s": round(time.monotonic() - started, 3),
@@ -183,6 +236,8 @@ async def _process_report(report: Report) -> tuple[Report, dict]:
             "extraction": None,
             "audit": None,
             "error": f"{type(error).__name__}: {error}",
+            "coverage_count": 0,
+            "pending_kpis": list(KPI_KEYS),
             "llm_calls": llm_counter.count,
             "prevented_early_stops": execution_guard.prevented_early_stops,
             "elapsed_s": round(time.monotonic() - started, 3),
@@ -209,6 +264,7 @@ async def run_multi_kpi(
     started = time.monotonic()
     processed = 0
     ok = 0
+    incomplete = 0
     failed = 0
     total_llm_calls = 0
     total_prevented_early_stops = 0
@@ -232,6 +288,8 @@ async def run_multi_kpi(
         _write_record(raw_dir / f"{report.report_id}.json", record)
         if record["status"] == "ok":
             ok += 1
+        elif record["status"] == "incomplete":
+            incomplete += 1
         else:
             failed += 1
 
@@ -244,10 +302,13 @@ async def run_multi_kpi(
         "reports_resumed": selection_stats.resumed,
         "report_ids": selection_stats.report_ids,
         "ok": ok,
+        "incomplete": incomplete,
         "failed": failed,
         "total_llm_calls": total_llm_calls,
         "total_prevented_early_stops": total_prevented_early_stops,
         "llm_call_limit": MULTI_KPI_LLM_CALL_LIMIT,
+        "adk_run_call_limit": MULTI_KPI_SUBMISSION_DEADLINE,
+        "max_output_tokens": MULTI_KPI_MAX_OUTPUT_TOKENS,
         "submission_deadline": MULTI_KPI_SUBMISSION_DEADLINE,
         "budget_reminder_calls": [
             MULTI_KPI_PROGRESS_REMINDER_CALL,
@@ -256,6 +317,9 @@ async def run_multi_kpi(
         "concurrency": concurrency,
         "context_management": {
             "adk_context_filter": "recorded_multi_kpi",
+            "checkpoint_state": "multi_kpi_work_record",
+            "older_tool_payloads": "active_retrieval_retained_until_next_retrieval",
+            "model_context_window_tokens": MULTI_KPI_CONTEXT_WINDOW_TOKENS,
             "compaction_token_threshold": MULTI_KPI_COMPACTION_TOKEN_THRESHOLD,
             "compaction_event_retention": MULTI_KPI_COMPACTION_EVENT_RETENTION,
         },

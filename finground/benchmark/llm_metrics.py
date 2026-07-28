@@ -8,6 +8,8 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
+from finground.tools import MULTI_KPI_ALLOW_PARTIAL_STATE_KEY
+
 
 class LlmCallCounterPlugin(BasePlugin):
     """Count model requests attempted during one benchmark invocation."""
@@ -37,7 +39,15 @@ class LlmCallCounterPlugin(BasePlugin):
             and self.count >= self.force_tool_at_call
             and self.forced_tool_name is not None
         ):
+            callback_context.state[MULTI_KPI_ALLOW_PARTIAL_STATE_KEY] = True
             llm_request.config = llm_request.config or types.GenerateContentConfig()
+            for tool_group in llm_request.config.tools or []:
+                declarations = tool_group.function_declarations or []
+                tool_group.function_declarations = [
+                    declaration
+                    for declaration in declarations
+                    if declaration.name == self.forced_tool_name
+                ]
             llm_request.config.tool_config = types.ToolConfig(
                 function_calling_config=types.FunctionCallingConfig(
                     mode=types.FunctionCallingConfigMode.ANY,

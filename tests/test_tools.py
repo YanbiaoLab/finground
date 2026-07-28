@@ -6,6 +6,7 @@ import pytest
 from finground.documents import Report
 from finground.kpis import KPI_KEYS
 from finground.tools import (
+    MULTI_KPI_ALLOW_PARTIAL_STATE_KEY,
     MULTI_KPI_AUDIT_STATE_KEY,
     MULTI_KPI_RESULT_STATE_KEY,
     MULTI_KPI_WORK_RECORD_STATE_KEY,
@@ -62,6 +63,14 @@ def _evidence(
     }
 
 
+def _absent_coverage(*excluded: str) -> list[dict]:
+    return [
+        {"kpi": kpi, "fiscal_year": 2023, "status": "absent"}
+        for kpi in KPI_KEYS
+        if kpi not in excluded
+    ]
+
+
 def test_report_state_contains_document_pages() -> None:
     state = _context().state["report"]
 
@@ -79,6 +88,41 @@ def test_get_report_info_returns_page_count_and_bounded_outline() -> None:
     assert result["outline"][-1] == {
         "page": 3,
         "heading": "Consolidated Statements of Operations",
+    }
+    assert result["statement_pages"] == {
+        "income_statement": [3],
+        "balance_sheet": [],
+        "cash_flow_statement": [],
+    }
+
+
+def test_get_report_info_classifies_untitled_primary_statement_tables() -> None:
+    report = Report(
+        "ASX_ACME_2023",
+        "ASX",
+        "ACME",
+        2023,
+        """\
+<table><tr><td></td><td>2023</td></tr><tr><td>Revenue</td><td>10</td></tr>
+<tr><td>Basic earnings per share</td><td>1</td></tr>
+<tr><td>Diluted earnings per share</td><td>1</td></tr></table>
+<--- Page Split --->
+<table><tr><td>Current assets</td><td>10</td></tr><tr><td>Total assets</td><td>20</td></tr>
+<tr><td>Current liabilities</td><td>5</td></tr>
+<tr><td>Total liabilities</td><td>8</td></tr></table>
+<--- Page Split --->
+<table><tr><td>Cash flows from operating activities</td><td>10</td></tr>
+<tr><td>Cash flows from investing activities</td><td>(4)</td></tr></table>
+""",
+    )
+    context = SimpleNamespace(state={"report": build_report_state(report)})
+
+    result = get_report_info(context)
+
+    assert result["statement_pages"] == {
+        "income_statement": [1],
+        "balance_sheet": [2],
+        "cash_flow_statement": [3],
     }
 
 
@@ -180,12 +224,15 @@ def test_submit_multi_kpi_stores_ledger_result_in_state() -> None:
         "ACME",
         "USD",
         "Values reported in millions.",
-        [_evidence()],
+        [_evidence(), *_absent_coverage("revenue")],
         context,
     )
 
     assert result == {
         "status": "success",
+        "completion_status": "complete",
+        "coverage_count": len(KPI_KEYS),
+        "pending_kpis": [],
         "result": {
             "ticker": "ACME",
             "reporting_currency": "USD",
@@ -194,7 +241,12 @@ def test_submit_multi_kpi_stores_ledger_result_in_state() -> None:
         },
     }
     assert context.state[MULTI_KPI_RESULT_STATE_KEY] == result["result"]
-    assert context.state[MULTI_KPI_AUDIT_STATE_KEY]["kpis"][0]["value_verbatim"] == "1,234"
+    revenue_audit = next(
+        item
+        for item in context.state[MULTI_KPI_AUDIT_STATE_KEY]["kpis"]
+        if item["kpi"] == "revenue"
+    )
+    assert revenue_audit["value_verbatim"] == "1,234"
     assert context.actions.skip_summarization is True
 
 
@@ -206,9 +258,8 @@ def test_submit_multi_kpi_rejects_empty_rows_without_recorded_kpis() -> None:
     assert result["status"] == "error"
     assert result["retryable"] is True
     assert result["validation_errors"][0]["field"] == "kpis"
-    assert "absent/ambiguous coverage for every KPI" in result["validation_errors"][0][
-        "message"
-    ]
+    assert "complete coverage for every KPI" in result["validation_errors"][0]["message"]
+    assert result["pending_kpis"] == list(KPI_KEYS)
     assert MULTI_KPI_RESULT_STATE_KEY not in context.state
     assert context.actions.skip_summarization is None
 
@@ -260,6 +311,8 @@ def test_record_multi_kpi_progress_merges_kpis_and_deduplicates_notes() -> None:
         "status": "success",
         "kpi_count": 1,
         "coverage_count": 1,
+        "pending_count": len(KPI_KEYS) - 1,
+        "pending_kpis": [kpi for kpi in KPI_KEYS if kpi != "revenue"],
         "status_counts": {"found": 1},
         "note_count": 1,
         "added_kpi_count": 1,
@@ -271,6 +324,10 @@ def test_record_multi_kpi_progress_merges_kpis_and_deduplicates_notes() -> None:
         "status": "success",
         "kpi_count": 2,
         "coverage_count": 2,
+        "pending_count": len(KPI_KEYS) - 2,
+        "pending_kpis": [
+            kpi for kpi in KPI_KEYS if kpi not in {"operating_income", "revenue"}
+        ],
         "status_counts": {"found": 2},
         "note_count": 2,
         "added_kpi_count": 1,
@@ -281,6 +338,8 @@ def test_record_multi_kpi_progress_merges_kpis_and_deduplicates_notes() -> None:
     assert current["status"] == "success"
     assert current["view"] == "all"
     assert current["kpi_count"] == 2
+    assert current["coverage_count"] == 2
+    assert current["pending_count"] == len(KPI_KEYS) - 2
     assert current["note_count"] == 2
     assert current["record"]["reporting_currency"] == "USD"
     assert current["record"]["units_note"] == "Values reported in millions."
@@ -322,6 +381,7 @@ def test_query_multi_kpi_progress_supports_bounded_views() -> None:
     notes = query_multi_kpi_progress("notes", context)
 
     assert "notes" not in kpis["record"]
+    assert kpis["pending_kpis"] == [kpi for kpi in KPI_KEYS if kpi != "revenue"]
     assert notes["record"] == {
         "ticker": "ACME",
         "notes": [{"category": "todo", "text": "Check the cash-flow statement.", "pages": []}],
@@ -369,12 +429,14 @@ def test_submit_multi_kpi_combines_recorded_and_final_rows() -> None:
                 kpi="operating_income",
                 value_verbatim="210",
                 line_label="Operating income",
-            )
+            ),
+            *_absent_coverage("operating_income", "revenue"),
         ],
         context,
     )
 
     assert result["status"] == "success"
+    assert result["completion_status"] == "complete"
     assert result["result"]["reporting_currency"] == "USD"
     assert result["result"]["kpis"] == [
         {"kpi": "operating_income", "fiscal_year": 2023, "value": 210_000_000.0},
@@ -387,7 +449,7 @@ def test_submit_multi_kpi_accepts_work_record_without_final_rows() -> None:
     record_multi_kpi_progress(
         "USD",
         None,
-        [_evidence()],
+        [_evidence(), *_absent_coverage("revenue")],
         [{"category": "unit", "text": "Statement is in millions.", "pages": [3]}],
         context,
     )
@@ -395,6 +457,7 @@ def test_submit_multi_kpi_accepts_work_record_without_final_rows() -> None:
     result = submit_multi_kpi_extraction("ACME", None, None, [], context)
 
     assert result["status"] == "success"
+    assert result["completion_status"] == "complete"
     assert result["result"] == {
         "ticker": "ACME",
         "reporting_currency": "USD",
@@ -402,6 +465,31 @@ def test_submit_multi_kpi_accepts_work_record_without_final_rows() -> None:
         "kpis": [{"kpi": "revenue", "fiscal_year": 2023, "value": 1_234_000_000.0}],
     }
     assert "notes" not in result["result"]
+
+
+def test_submit_multi_kpi_rejects_partial_nonempty_result_before_deadline() -> None:
+    context = _context()
+
+    result = submit_multi_kpi_extraction("ACME", "USD", None, [_evidence()], context)
+
+    assert result["status"] == "error"
+    assert result["retryable"] is True
+    assert result["coverage_count"] == 1
+    assert result["pending_kpis"] == [kpi for kpi in KPI_KEYS if kpi != "revenue"]
+    assert MULTI_KPI_RESULT_STATE_KEY not in context.state
+
+
+def test_submit_multi_kpi_marks_forced_partial_result_incomplete() -> None:
+    context = _context()
+    context.state[MULTI_KPI_ALLOW_PARTIAL_STATE_KEY] = True
+
+    result = submit_multi_kpi_extraction("ACME", "USD", None, [_evidence()], context)
+
+    assert result["status"] == "success"
+    assert result["completion_status"] == "incomplete"
+    assert result["coverage_count"] == 1
+    assert result["pending_kpis"] == [kpi for kpi in KPI_KEYS if kpi != "revenue"]
+    assert context.state[MULTI_KPI_RESULT_STATE_KEY] == result["result"]
 
 
 def test_record_multi_kpi_progress_derives_scale_from_exact_unit_text() -> None:
@@ -483,6 +571,105 @@ def test_record_multi_kpi_progress_validates_one_line_html_table_rows() -> None:
     )
 
 
+def test_record_multi_kpi_progress_rejects_value_from_wrong_year_column() -> None:
+    context = _context()
+    evidence = _evidence(value_verbatim="1,100")
+
+    result = record_multi_kpi_progress(None, None, [evidence], [], context)
+
+    assert result["status"] == "error"
+    assert result["validation_errors"] == [
+        {
+            "field": "kpis.0.value_verbatim",
+            "message": "number was not found in the cited fiscal-year cell",
+        }
+    ]
+    assert MULTI_KPI_WORK_RECORD_STATE_KEY not in context.state
+
+
+def test_record_multi_kpi_progress_keeps_valid_rows_when_one_row_is_invalid() -> None:
+    context = _context()
+    invalid = _evidence(
+        kpi="operating_income",
+        value_verbatim="999",
+        line_label="Operating income",
+    )
+
+    result = record_multi_kpi_progress(
+        "USD",
+        "millions",
+        [_evidence(), invalid],
+        [],
+        context,
+    )
+
+    assert result["status"] == "partial_success"
+    assert result["retryable"] is True
+    assert result["added_kpi_count"] == 1
+    assert result["validation_errors"] == [
+        {
+            "field": "kpis.1.value_verbatim",
+            "message": "number was not found in the cited fiscal-year cell",
+        }
+    ]
+    assert [
+        item["kpi"] for item in context.state[MULTI_KPI_WORK_RECORD_STATE_KEY]["kpis"]
+    ] == ["revenue"]
+
+
+def test_record_multi_kpi_progress_rejects_non_report_fiscal_year() -> None:
+    context = _context()
+    evidence = _evidence(fiscal_year=2022, value_verbatim="1,100")
+
+    result = record_multi_kpi_progress(None, None, [evidence], [], context)
+
+    assert result["status"] == "error"
+    assert result["validation_errors"] == [
+        {
+            "field": "kpis.0.fiscal_year",
+            "message": "fiscal_year must match report fiscal year 2023",
+        }
+    ]
+    assert MULTI_KPI_WORK_RECORD_STATE_KEY not in context.state
+
+
+def test_record_multi_kpi_progress_normalizes_interest_expense_as_positive_cost() -> None:
+    context = _context()
+    context.state["report"]["pages"][2]["text"] += "\n| Interest expense | (113) | (101) |"
+    evidence = _evidence(
+        kpi="interest_expense",
+        value_verbatim="(113)",
+        line_label="Interest expense",
+    )
+
+    result = record_multi_kpi_progress(None, None, [evidence], [], context)
+
+    assert result["status"] == "success"
+    recorded = context.state[MULTI_KPI_WORK_RECORD_STATE_KEY]["kpis"][0]
+    assert recorded["value"] == 113_000_000.0
+    assert recorded["normalization"]["sign_rule"] == "positive_magnitude"
+
+
+def test_record_multi_kpi_progress_requires_printed_number_sign() -> None:
+    context = _context()
+    context.state["report"]["pages"][2]["text"] += "\n| Interest expense | (113) | (101) |"
+    evidence = _evidence(
+        kpi="interest_expense",
+        value_verbatim="113",
+        line_label="Interest expense",
+    )
+
+    result = record_multi_kpi_progress(None, None, [evidence], [], context)
+
+    assert result["status"] == "error"
+    assert result["validation_errors"] == [
+        {
+            "field": "kpis.0.value_verbatim",
+            "message": "number was not found in the cited fiscal-year cell",
+        }
+    ]
+
+
 def test_record_multi_kpi_progress_distinguishes_explicit_zero_from_missing() -> None:
     context = _context()
     context.state["report"]["pages"][2]["text"] += "\n| Long-term debt | - | 20 |"
@@ -494,7 +681,13 @@ def test_record_multi_kpi_progress_distinguishes_explicit_zero_from_missing() ->
     )
 
     recorded = record_multi_kpi_progress(None, None, [zero], [], context)
-    result = submit_multi_kpi_extraction("ACME", None, None, [], context)
+    result = submit_multi_kpi_extraction(
+        "ACME",
+        None,
+        None,
+        _absent_coverage("long_term_debt_noncurrent"),
+        context,
+    )
 
     assert recorded["status_counts"] == {"explicit_zero": 1}
     assert result["status"] == "success"
@@ -513,6 +706,9 @@ def test_submit_multi_kpi_accepts_fully_covered_all_missing_report() -> None:
 
     assert result == {
         "status": "success",
+        "completion_status": "complete",
+        "coverage_count": len(KPI_KEYS),
+        "pending_kpis": [],
         "result": {
             "ticker": "ACME",
             "reporting_currency": None,

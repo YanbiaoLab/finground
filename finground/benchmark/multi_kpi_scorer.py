@@ -65,7 +65,7 @@ def _load_predictions(
             "report_name": report_name,
         }
         runs.append(run)
-        if record.get("status") != "ok":
+        if record.get("status") not in {"ok", "incomplete"}:
             continue
         try:
             extraction = ReportExtraction.model_validate(record.get("extraction"))

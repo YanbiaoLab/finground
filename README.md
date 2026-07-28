@@ -37,6 +37,16 @@ Any model name beginning with `qwen` (case-insensitive) uses the configured
 vLLM endpoint. A model name beginning with `deepseek-` uses LiteLLM's DeepSeek
 provider. Other model names are passed directly to Google ADK.
 
+The Multi-KPI agent is configured for a 128k-token model context window. ADK
+event compaction starts at 98,304 tokens, retaining 25% of the window for the
+system prompt, tool declarations, and the next model response. Each successful
+`record_multi_kpi_progress` call checkpoints validated evidence in session
+state; older search and page payloads are then removed from subsequent model
+requests while the immutable report remains available through tools. Qwen
+thinking and parallel tool calls are disabled, and each model turn has a
+4,096-token output budget so structured tool arguments can finish without
+being truncated.
+
 ## Download the datasets
 
 The official datasets are hosted on Hugging Face:

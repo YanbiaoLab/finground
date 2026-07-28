@@ -11,7 +11,7 @@ from typing import Any
 from google.adk.tools import ToolContext
 from pydantic import TypeAdapter, ValidationError
 
-from finground.kpis import KPI_KEYS, POSITIVE_OUTFLOW_KPIS
+from finground.kpis import KPI_KEYS, POSITIVE_MAGNITUDE_KPIS, POSITIVE_OUTFLOW_KPIS
 from finground.models import (
     MultiKpiEvidence,
     MultiKpiEvidenceCandidate,
@@ -42,10 +42,19 @@ NEEDLE_RESULT_STATE_KEY = "needle_result"
 MULTI_KPI_WORK_RECORD_STATE_KEY = "multi_kpi_work_record"
 MULTI_KPI_RESULT_STATE_KEY = "multi_kpi_result"
 MULTI_KPI_AUDIT_STATE_KEY = "multi_kpi_audit"
+MULTI_KPI_ALLOW_PARTIAL_STATE_KEY = "temp:multi_kpi_allow_partial_submission"
 
 _EVIDENCE_CANDIDATES = TypeAdapter(list[MultiKpiEvidenceCandidate])
 _MULTI_KPI_NOTES = TypeAdapter(list[MultiKpiNote])
 _EXPLICIT_ZERO_MARKERS = {"-", "−", "–", "—", "nil"}
+MAX_MULTI_KPI_RECORD_ROWS = 8
+
+_HTML_TABLE_RE = re.compile(r"<table\b[^>]*>.*?</table>", re.IGNORECASE | re.DOTALL)
+_HTML_ROW_RE = re.compile(r"<tr\b[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
+_HTML_CELL_RE = re.compile(
+    r"<t[dh]\b([^>]*)>(.*?)</t[dh]>",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _multi_kpi_submission_errors(
@@ -142,7 +151,7 @@ def _line_contains_number(page_text: str, line_label: str, value_verbatim: str) 
                 observed = parse_financial_number(token)
             except ValueError:
                 continue
-            if math.isclose(abs(observed), abs(expected), rel_tol=1e-12, abs_tol=1e-12):
+            if math.isclose(observed, expected, rel_tol=1e-12, abs_tol=1e-12):
                 return True
     return False
 
@@ -155,6 +164,148 @@ def _line_contains_zero_marker(page_text: str, line_label: str, marker: str) -> 
         and normalized_marker in unescape(line).casefold()
         for line in _source_rows(page_text)
     )
+
+
+def _html_span(attributes: str, name: str) -> int:
+    match = re.search(
+        rf"\b{name}\s*=\s*[\"']?(\d+)",
+        attributes,
+        flags=re.IGNORECASE,
+    )
+    return max(1, int(match.group(1))) if match else 1
+
+
+def _expand_table_rows(
+    rows: list[list[tuple[str, int, int]]],
+) -> list[list[str]]:
+    grid: list[list[str]] = []
+    active_rowspans: dict[int, tuple[int, str]] = {}
+    for raw_row in rows:
+        values = {column: item[1] for column, item in active_rowspans.items()}
+        next_rowspans = {
+            column: (item[0] - 1, item[1])
+            for column, item in active_rowspans.items()
+            if item[0] > 1
+        }
+        column = 0
+        for text, colspan, rowspan in raw_row:
+            while any(column + offset in values for offset in range(colspan)):
+                column += 1
+            for offset in range(colspan):
+                target = column + offset
+                values[target] = text
+                if rowspan > 1:
+                    next_rowspans[target] = (rowspan - 1, text)
+            column += colspan
+        active_rowspans = next_rowspans
+        if values:
+            grid.append([values.get(index, "") for index in range(max(values) + 1)])
+    return grid
+
+
+def _html_table_grids(page_text: str) -> list[list[list[str]]]:
+    tables: list[list[list[str]]] = []
+    for table_match in _HTML_TABLE_RE.finditer(page_text):
+        rows: list[list[tuple[str, int, int]]] = []
+        for row_match in _HTML_ROW_RE.finditer(table_match.group()):
+            cells = [
+                (
+                    _normalized_source_text(cell_html),
+                    _html_span(attributes, "colspan"),
+                    _html_span(attributes, "rowspan"),
+                )
+                for attributes, cell_html in _HTML_CELL_RE.findall(row_match.group(1))
+            ]
+            if cells:
+                rows.append(cells)
+        if rows:
+            tables.append(_expand_table_rows(rows))
+    return tables
+
+
+def _is_markdown_separator_row(row: list[str]) -> bool:
+    return bool(row) and all(
+        not cell or re.fullmatch(r":?-{3,}:?", cell.strip()) is not None for cell in row
+    )
+
+
+def _markdown_table_grids(page_text: str) -> list[list[list[str]]]:
+    tables: list[list[list[str]]] = []
+    current: list[list[str]] = []
+    for line in page_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("|") and stripped.endswith("|"):
+            cells = [cell.strip() for cell in stripped[1:-1].split("|")]
+            if not _is_markdown_separator_row(cells):
+                current.append(cells)
+        elif current:
+            if len(current) > 1:
+                tables.append(current)
+            current = []
+    if len(current) > 1:
+        tables.append(current)
+    return tables
+
+
+def _cell_contains_number(cell: str, value_verbatim: str) -> bool:
+    candidate_tokens = NUMBER_TOKEN_RE.findall(value_verbatim)
+    if len(candidate_tokens) != 1:
+        return False
+    try:
+        expected = parse_financial_number(candidate_tokens[0])
+    except ValueError:
+        return False
+    for token in NUMBER_TOKEN_RE.findall(cell):
+        try:
+            observed = parse_financial_number(token)
+        except ValueError:
+            continue
+        if math.isclose(observed, expected, rel_tol=1e-12, abs_tol=1e-12):
+            return True
+    return False
+
+
+def _cell_contains_zero_marker(cell: str, marker: str) -> bool:
+    normalized_cell = re.sub(r"[$€£¥\s]", "", unescape(cell)).casefold()
+    return normalized_cell == marker.strip().casefold()
+
+
+def _value_matches_year_column(
+    page_text: str,
+    candidate: MultiKpiEvidenceCandidate,
+) -> bool | None:
+    """Return whether table structure aligns the source token to the cited year.
+
+    ``None`` means the page did not expose a parseable row/year grid, so callers
+    can retain the existing conservative row-level fallback for OCR prose.
+    """
+    assert candidate.line_label is not None
+    assert candidate.value_verbatim is not None
+    normalized_label = _normalized_source_text(candidate.line_label)
+    year = str(candidate.fiscal_year)
+    attempted_alignment = False
+    for table in [*_html_table_grids(page_text), *_markdown_table_grids(page_text)]:
+        for row_index, row in enumerate(table):
+            if not any(normalized_label in _normalized_source_text(cell) for cell in row):
+                continue
+            year_columns = {
+                column
+                for header in table[: min(row_index, 4)]
+                for column, cell in enumerate(header)
+                if re.search(rf"(?<!\d){re.escape(year)}(?!\d)", cell)
+            }
+            if not year_columns:
+                continue
+            attempted_alignment = True
+            for column in year_columns:
+                if column >= len(row):
+                    continue
+                if candidate.status == "explicit_zero":
+                    if _cell_contains_zero_marker(row[column], candidate.value_verbatim):
+                        return True
+                elif _cell_contains_number(row[column], candidate.value_verbatim):
+                    return True
+    return False if attempted_alignment else None
 
 
 def _resolve_multi_kpi_scale(
@@ -173,6 +324,7 @@ def _resolve_multi_kpi_scale(
 def _normalize_multi_kpi_candidates(
     raw_candidates: list[object],
     pages: list[Any],
+    report_year: int,
 ) -> tuple[list[MultiKpiEvidence], list[dict[str, str]], list[dict[str, Any]]]:
     try:
         candidates = _EVIDENCE_CANDIDATES.validate_python(raw_candidates)
@@ -203,6 +355,15 @@ def _normalize_multi_kpi_candidates(
             )
             continue
         seen.add(key)
+
+        if candidate.fiscal_year != report_year:
+            errors.append(
+                {
+                    "field": f"kpis.{index}.fiscal_year",
+                    "message": f"fiscal_year must match report fiscal year {report_year}",
+                }
+            )
+            continue
 
         if candidate.status not in {"found", "explicit_zero"}:
             normalized.append(MultiKpiEvidence(**candidate.model_dump()))
@@ -281,7 +442,18 @@ def _normalize_multi_kpi_candidates(
                     }
                 )
                 continue
-            if not _line_contains_zero_marker(page_text, candidate.line_label, marker):
+            aligned = _value_matches_year_column(page_text, candidate)
+            if aligned is False:
+                errors.append(
+                    {
+                        "field": f"kpis.{index}.value_verbatim",
+                        "message": "zero marker was not found in the cited fiscal-year cell",
+                    }
+                )
+                continue
+            if aligned is None and not _line_contains_zero_marker(
+                page_text, candidate.line_label, marker
+            ):
                 errors.append(
                     {
                         "field": f"kpis.{index}.value_verbatim",
@@ -302,8 +474,19 @@ def _normalize_multi_kpi_candidates(
                     }
                 )
                 continue
-            if not _line_contains_number(
-                page_text, candidate.line_label, candidate.value_verbatim
+            aligned = _value_matches_year_column(page_text, candidate)
+            if aligned is False:
+                errors.append(
+                    {
+                        "field": f"kpis.{index}.value_verbatim",
+                        "message": "number was not found in the cited fiscal-year cell",
+                    }
+                )
+                continue
+            if aligned is None and not _line_contains_number(
+                page_text,
+                candidate.line_label,
+                candidate.value_verbatim,
             ):
                 errors.append(
                     {
@@ -323,11 +506,15 @@ def _normalize_multi_kpi_candidates(
                     }
                 )
                 continue
-            sign_rule = (
-                "positive_outflow"
-                if candidate.kpi in POSITIVE_OUTFLOW_KPIS
-                else "as_reported"
-            )
+            if candidate.kpi in POSITIVE_MAGNITUDE_KPIS:
+                value = abs(value)
+                sign_rule = (
+                    "positive_outflow"
+                    if candidate.kpi in POSITIVE_OUTFLOW_KPIS
+                    else "positive_magnitude"
+                )
+            else:
+                sign_rule = "as_reported"
 
         normalized.append(
             MultiKpiEvidence(
@@ -342,7 +529,7 @@ def _normalize_multi_kpi_candidates(
                         "explicit printed zero"
                         if sign_rule == "explicit_zero"
                         else f"abs({parsed_number} * {SCALE_MULTIPLIERS[scale]})"
-                        if sign_rule == "positive_outflow"
+                        if sign_rule in {"positive_outflow", "positive_magnitude"}
                         else f"{parsed_number} * {SCALE_MULTIPLIERS[scale]}"
                     ),
                 },
@@ -355,6 +542,13 @@ def _work_record_counts(work_record: MultiKpiWorkRecord) -> tuple[int, Counter[s
     status_counts = Counter(item.status for item in work_record.kpis)
     extracted_count = status_counts["found"] + status_counts["explicit_zero"]
     return extracted_count, status_counts
+
+
+def _pending_multi_kpis(work_record: MultiKpiWorkRecord, report_year: int) -> list[str]:
+    covered = {
+        item.kpi for item in work_record.kpis if item.fiscal_year == report_year
+    }
+    return [kpi for kpi in KPI_KEYS if kpi not in covered]
 
 
 def _load_multi_kpi_work_record(tool_context: ToolContext) -> MultiKpiWorkRecord | None:
@@ -419,10 +613,11 @@ def record_multi_kpi_progress(
             prefix="notes",
         )
     incoming_kpis, evidence_errors, corrections = _normalize_multi_kpi_candidates(
-        kpis, pages
+        kpis,
+        pages,
+        int(report.get("year", 0)),
     )
     errors = _multi_kpi_submission_errors(metadata, report)
-    errors.extend(evidence_errors)
     valid_pages = {page.display_number for page in pages}
     for note_index, note in enumerate(incoming_notes):
         missing_pages = [page for page in note.pages if page not in valid_pages]
@@ -433,25 +628,30 @@ def record_multi_kpi_progress(
                     "message": f"pages do not exist in the report: {missing_pages}",
                 }
             )
-    if (
-        not incoming_kpis
-        and not evidence_errors
-        and not incoming_notes
-        and metadata.reporting_currency is None
-        and metadata.units_note is None
-    ):
-        errors.append(
-            {
-                "field": "record",
-                "message": "record at least one KPI, note, currency, or units observation",
-            }
-        )
     if errors:
         return {
             "status": "error",
             "retryable": True,
             "error": "progress record failed basic data checks",
-            "validation_errors": errors,
+            "validation_errors": [*errors, *evidence_errors],
+        }
+    if (
+        not incoming_kpis
+        and not incoming_notes
+        and metadata.reporting_currency is None
+        and metadata.units_note is None
+    ):
+        validation_errors = evidence_errors or [
+            {
+                "field": "record",
+                "message": "record at least one KPI, note, currency, or units observation",
+            }
+        ]
+        return {
+            "status": "error",
+            "retryable": True,
+            "error": "progress record failed basic data checks",
+            "validation_errors": validation_errors,
         }
 
     work_record = _load_multi_kpi_work_record(tool_context)
@@ -501,10 +701,13 @@ def record_multi_kpi_progress(
     result = combined.model_dump()
     tool_context.state[MULTI_KPI_WORK_RECORD_STATE_KEY] = result
     extracted_count, status_counts = _work_record_counts(combined)
-    return {
-        "status": "success",
+    pending_kpis = _pending_multi_kpis(combined, int(report.get("year", 0)))
+    response = {
+        "status": "partial_success" if evidence_errors else "success",
         "kpi_count": extracted_count,
         "coverage_count": len(combined.kpis),
+        "pending_count": len(pending_kpis),
+        "pending_kpis": pending_kpis,
         "status_counts": dict(status_counts),
         "note_count": len(combined.notes),
         "added_kpi_count": added,
@@ -512,6 +715,15 @@ def record_multi_kpi_progress(
         "added_note_count": len(added_notes),
         "normalization_corrections": corrections,
     }
+    if evidence_errors:
+        response.update(
+            {
+                "retryable": True,
+                "error": "valid progress was saved; correct the rejected KPI rows",
+                "validation_errors": evidence_errors,
+            }
+        )
+    return response
 
 
 def query_multi_kpi_progress(view: MultiKpiRecordView, tool_context: ToolContext) -> dict:
@@ -552,11 +764,14 @@ def query_multi_kpi_progress(view: MultiKpiRecordView, tool_context: ToolContext
     elif view == "notes":
         record = {"ticker": work_record.ticker, "notes": record["notes"]}
     extracted_count, status_counts = _work_record_counts(work_record)
+    pending_kpis = _pending_multi_kpis(work_record, int(report.get("year", 0)))
     return {
         "status": "success",
         "view": view,
         "kpi_count": extracted_count,
         "coverage_count": len(work_record.kpis),
+        "pending_count": len(pending_kpis),
+        "pending_kpis": pending_kpis,
         "status_counts": dict(status_counts),
         "note_count": len(work_record.notes),
         "record": record,
@@ -738,7 +953,9 @@ def submit_multi_kpi_extraction(
         )
 
     incoming_kpis, evidence_errors, _corrections = _normalize_multi_kpi_candidates(
-        kpis, pages
+        kpis,
+        pages,
+        int(report.get("year", 0)),
     )
     errors = _multi_kpi_submission_errors(metadata, report)
     errors.extend(evidence_errors)
@@ -792,31 +1009,27 @@ def submit_multi_kpi_extraction(
         ],
     )
     errors = _multi_kpi_submission_errors(extraction, report)
-    if not extraction.kpis:
-        report_year = int(report.get("year", 0))
-        covered = {
-            item.kpi
-            for item in combined.kpis
-            if item.fiscal_year == report_year and item.status in {"absent", "ambiguous"}
-        }
-        missing_coverage = [kpi for kpi in KPI_KEYS if kpi not in covered]
-        if missing_coverage:
-            errors.append(
-                {
-                    "field": "kpis",
-                    "message": (
-                        "empty extraction requires absent/ambiguous coverage for every KPI in "
-                        f"fiscal year {report_year}; missing {len(missing_coverage)}: "
-                        + ", ".join(missing_coverage)
-                    ),
-                }
-            )
+    report_year = int(report.get("year", 0))
+    pending_kpis = _pending_multi_kpis(combined, report_year)
+    allow_partial = bool(tool_context.state.get(MULTI_KPI_ALLOW_PARTIAL_STATE_KEY))
+    if pending_kpis and not allow_partial:
+        errors.append(
+            {
+                "field": "kpis",
+                "message": (
+                    f"complete coverage for every KPI in fiscal year {report_year} is required; "
+                    f"pending {len(pending_kpis)}: " + ", ".join(pending_kpis)
+                ),
+            }
+        )
     if errors:
         return {
             "status": "error",
             "retryable": True,
             "error": "combined extraction failed basic data checks",
             "validation_errors": errors,
+            "coverage_count": len(KPI_KEYS) - len(pending_kpis),
+            "pending_kpis": pending_kpis,
         }
 
     result = extraction.model_dump()
@@ -827,7 +1040,13 @@ def submit_multi_kpi_extraction(
     actions = getattr(tool_context, "actions", None)
     if actions is not None:
         actions.skip_summarization = True
-    return {"status": "success", "result": result}
+    return {
+        "status": "success",
+        "completion_status": "incomplete" if pending_kpis else "complete",
+        "coverage_count": len(KPI_KEYS) - len(pending_kpis),
+        "pending_kpis": pending_kpis,
+        "result": result,
+    }
 
 
 _NULLABLE_STRING_SCHEMA = {
@@ -844,7 +1063,11 @@ record_multi_kpi_progress_tool = JsonSchemaFunctionTool(
         "properties": {
             "reporting_currency": _NULLABLE_STRING_SCHEMA,
             "units_note": _NULLABLE_STRING_SCHEMA,
-            "kpis": {"type": "array", "items": _EVIDENCE_SCHEMA},
+            "kpis": {
+                "type": "array",
+                "items": _EVIDENCE_SCHEMA,
+                "maxItems": MAX_MULTI_KPI_RECORD_ROWS,
+            },
             "notes": {"type": "array", "items": _NOTE_SCHEMA},
         },
         "required": ["reporting_currency", "units_note", "kpis", "notes"],

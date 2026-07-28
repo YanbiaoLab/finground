@@ -25,7 +25,7 @@ def _response(name: str, call_id: str, response: dict) -> types.Content:
     )
 
 
-def test_context_filter_removes_old_tool_payloads_after_successful_record() -> None:
+def test_context_filter_removes_old_payloads_after_the_next_retrieval() -> None:
     large_page = "financial table " * 5_000
     contents = [
         types.Content(role="user", parts=[types.Part(text="Extract KPIs")]),
@@ -67,6 +67,33 @@ def test_context_filter_removes_old_tool_payloads_after_successful_record() -> N
     assert filtered[6].parts[0].function_response.response["pages"][0]["text"] == "current table"
 
 
+def test_context_filter_keeps_active_page_across_multiple_record_batches() -> None:
+    large_page = "financial table " * 5_000
+    contents = [
+        types.Content(role="user", parts=[types.Part(text="Extract KPIs")]),
+        _call("read_report_pages", "read-1", {"page_numbers": [10]}),
+        _response(
+            "read_report_pages",
+            "read-1",
+            {"status": "success", "pages": [{"page": 10, "text": large_page}]},
+        ),
+        _call(
+            "record_multi_kpi_progress",
+            "record-1",
+            {"reporting_currency": "USD", "units_note": None, "kpis": [], "notes": []},
+        ),
+        _response(
+            "record_multi_kpi_progress",
+            "record-1",
+            {"status": "success", "kpi_count": 8, "coverage_count": 8},
+        ),
+    ]
+
+    filtered = filter_recorded_multi_kpi_context(contents)
+
+    assert large_page in str(filtered[2].parts[0].function_response.response)
+
+
 def test_context_filter_keeps_history_until_progress_is_recorded() -> None:
     contents = [
         types.Content(role="user", parts=[types.Part(text="Extract KPIs")]),
@@ -79,3 +106,32 @@ def test_context_filter_keeps_history_until_progress_is_recorded() -> None:
     ]
 
     assert filter_recorded_multi_kpi_context(contents) is contents
+
+
+def test_context_filter_treats_partially_successful_record_as_progress() -> None:
+    contents = [
+        types.Content(role="user", parts=[types.Part(text="Extract KPIs")]),
+        _call("read_report_pages", "read-1", {"page_numbers": [10]}),
+        _response(
+            "read_report_pages",
+            "read-1",
+            {"status": "success", "pages": [{"page": 10, "text": "old table"}]},
+        ),
+        _call("record_multi_kpi_progress", "record-1", {"kpis": []}),
+        _response(
+            "record_multi_kpi_progress",
+            "record-1",
+            {"status": "partial_success", "added_kpi_count": 7},
+        ),
+        _call("read_report_pages", "read-2", {"page_numbers": [20]}),
+        _response(
+            "read_report_pages",
+            "read-2",
+            {"status": "success", "pages": [{"page": 20, "text": "new table"}]},
+        ),
+    ]
+
+    filtered = filter_recorded_multi_kpi_context(contents)
+
+    assert filtered[2].parts[0].function_response.response["status"] == "compacted"
+    assert filtered[6].parts[0].function_response.response["pages"][0]["text"] == "new table"

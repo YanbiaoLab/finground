@@ -10,24 +10,27 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
+from finground.tools.submission import MAX_MULTI_KPI_RECORD_ROWS
+
 FIRST_REMINDER_RATIO = 0.60
 FINAL_WARNING_RATIO = 0.80
 
-FIRST_REMINDER = """[LLM CALL BUDGET: 60% USED]
-Before any more retrieval, immediately call record_multi_kpi_progress with every selected source
-token and its page, row label, year label, unit text, and scope. Do not calculate value; the tool
-normalizes it. Record unresolved coverage as absent or ambiguous, then use at most one focused
-retrieval cycle for essential gaps. A printed dash/nil on a matching row is explicit_zero; an
-absent row is missing and must never become zero."""
+FIRST_REMINDER = f"""[LLM CALL BUDGET: 60% USED]
+Before any more retrieval, immediately call record_multi_kpi_progress in batches of at most
+{MAX_MULTI_KPI_RECORD_ROWS} rows with every selected source token and its page, row label, target
+fiscal-year label, unit text, and scope. Do not calculate value; the tool normalizes it. Then query
+pending_kpis and resolve them in grouped statement or note batches. Mark a KPI absent only after
+checking its relevant statement or note; do not bulk-mark unseen KPIs absent. A printed dash/nil on
+a matching row is explicit_zero; an absent row is missing and must never become zero."""
 
 FINAL_WARNING = """[LLM CALL BUDGET: 80% USED]
 Do not begin another search cycle. In this call, query the validated draft with
 query_multi_kpi_progress(view="kpis"). The next model call must call submit_multi_kpi_extraction.
 Pass kpis=[] to build the Ledger result from recorded evidence. Only if a final fact was not yet
 recorded may you pass it using the full evidence format; never pass a calculated value. Do not start
-new retrieval. Missing or ambiguous coverage is omitted; explicit_zero is retained as value 0.
-Never use an empty extraction merely to satisfy the budget unless complete missing coverage was
-already recorded."""
+new retrieval. Missing or ambiguous coverage is omitted; explicit_zero is retained as value 0. If
+pending_kpis remain, the forced submission will be persisted as incomplete rather than counted as a
+successful complete report."""
 
 
 class MultiKpiExecutionGuardPlugin(BasePlugin):

@@ -29,13 +29,15 @@ from finground.tools import (
 
 SETTINGS = load_settings()
 MULTI_KPI_APP_NAME = "finground_multi_kpi"
-MULTI_KPI_PROMPT_VERSION = "evidence-v1"
-MULTI_KPI_LLM_CALL_LIMIT = 30
+MULTI_KPI_PROMPT_VERSION = "evidence-v5"
+MULTI_KPI_LLM_CALL_LIMIT = 50
 MULTI_KPI_PROGRESS_REMINDER_CALL = math.ceil(MULTI_KPI_LLM_CALL_LIMIT * 0.60)
 MULTI_KPI_FINAL_WARNING_CALL = math.ceil(MULTI_KPI_LLM_CALL_LIMIT * 0.80)
 MULTI_KPI_SUBMISSION_DEADLINE = MULTI_KPI_FINAL_WARNING_CALL + 1
-MULTI_KPI_COMPACTION_TOKEN_THRESHOLD = 18_000
+MULTI_KPI_CONTEXT_WINDOW_TOKENS = 128 * 1024
+MULTI_KPI_COMPACTION_TOKEN_THRESHOLD = MULTI_KPI_CONTEXT_WINDOW_TOKENS * 3 // 4
 MULTI_KPI_COMPACTION_EVENT_RETENTION = 6
+MULTI_KPI_MAX_OUTPUT_TOKENS = 4_096
 
 
 def create_adk_model(model_name: str, *, json_output: bool = False) -> str | BaseLlm:
@@ -50,6 +52,9 @@ def create_adk_model(model_name: str, *, json_output: bool = False) -> str | Bas
             api_base=SETTINGS.vllm_base_url,
             api_key=SETTINGS.vllm_api_key,
             drop_params=True,
+            tool_choice="required",
+            parallel_tool_calls=False,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             **kwargs,
         )
     return model_name
@@ -114,8 +119,11 @@ LLM CALL BUDGET — HARD RULE:
 - This invocation has an absolute limit of {MULTI_KPI_LLM_CALL_LIMIT} model calls. Call
   submit_multi_kpi_extraction no later than model call {MULTI_KPI_SUBMISSION_DEADLINE}; a
   successful submission ends the run immediately.
-- Do not spend the budget proving that an unlocated KPI is absent. After the primary statements and
-  a focused note search, treat unresolved KPIs as missing and submit the validated partial result.
+- Maintain explicit coverage for all 31 KPI keys. A normal submission is accepted only after every
+  key is found, explicit_zero, absent, or ambiguous. At the forced deadline, a partial extraction
+  may be persisted as incomplete so work is not lost, but it is not a successful complete report.
+- Extract only the exact report fiscal year returned by get_report_info. Comparative columns are
+  context for aligning the target-year column, never additional output rows.
 - In LEDGER, Missing means omitting the corresponding KPI/year object from kpis. Never represent
   missing with value=null, a guessed value, or a sentinel. A printed 0 is status=found; a dash or
   "nil" on a clearly labelled row and fiscal-year column is status=explicit_zero and becomes 0.
@@ -123,46 +131,57 @@ LLM CALL BUDGET — HARD RULE:
   ambiguous rows. A completely empty extraction is allowed only after every KPI has explicit
   absent/ambiguous coverage for the report fiscal year; never use it merely to meet the deadline.
 - At model call {MULTI_KPI_PROGRESS_REMINDER_CALL}, a supplemental message will tell you to stop
-  exhaustive retrieval. You must immediately record every validated row before any further report
-  retrieval. At call {MULTI_KPI_FINAL_WARNING_CALL}, query the recorded KPI rows in that call and
-  submit on the next call. Use the remaining calls only for essential corrections.
+  exhaustive retrieval. Immediately record every validated row, query pending_kpis, and resolve
+  them in grouped statement/note batches. At call {MULTI_KPI_FINAL_WARNING_CALL}, query the recorded
+  KPI rows in that call and submit on the next call. Use remaining calls only for corrections.
 - Call {MULTI_KPI_SUBMISSION_DEADLINE} is restricted to submit_multi_kpi_extraction.
+- Emit exactly one tool call per model response and no prose beside it. Keep every tool argument
+  complete and valid JSON; split evidence across record calls instead of producing an oversized
+  argument object.
 
 Required workflow:
-1. Call get_report_info first and use its ticker and fiscal year exactly. Inspect its outline before
-   searching: when the outline identifies a primary statement page, read that page directly.
+1. Call get_report_info first and use its ticker and fiscal year exactly. Inspect statement_pages
+   and the outline before searching. Read classified primary statement pages directly.
 2. Locate the primary consolidated income statement, balance sheet, and cash-flow statement. Search
-   only for statement types not identified by the outline, using at most one search per missing
-   statement type. Read up to three related pages together with read_report_pages and
-   focus_phrases=[]. Reuse those pages across every KPI. Use no more than two additional focused
-   note search/read cycles total, and only for a material KPI absent from a primary statement.
-   Never search separately for every KPI. Prefer audited consolidated statements over highlights,
+   only for statement types not identified by statement_pages or the outline, using at most one
+   search per missing statement type. Read up to three related pages together with read_report_pages and
+   focus_phrases=[]. Reuse those pages across every KPI. Use no more than four additional focused
+   note search/read cycles total, grouping multiple pending KPIs into each search. Never search
+   separately for every KPI. Prefer audited consolidated statements over highlights,
    MD&A, segment, pro-forma, adjusted, or non-GAAP tables.
-3. After reading each statement or note batch, immediately call record_multi_kpi_progress. Record
-   every selected fact as structured evidence, plus durable notes about important evidence pages,
-   units, scope decisions, unresolved work, or warnings. For status=found, supply exactly: kpi,
-   fiscal_year, the unmodified printed value_verbatim, unit_scale, unit_text and unit_page when a
-   scale header exists, value page, statement, exact line_label, exact year_label, and scope. Do
-   not calculate or pass value: the tool parses, scales, and signs the source token deterministically.
+3. After reading each statement or note batch, immediately call record_multi_kpi_progress. Use no
+   more than 8 KPI rows per record call; split larger statements across calls. Record every selected
+   fact as structured evidence, plus durable notes about important evidence pages, units, scope
+   decisions, unresolved work, or warnings. For status=found, supply exactly: kpi, fiscal_year, the
+   unmodified printed value_verbatim, unit_scale, unit_text and unit_page when a scale header exists,
+   value page, statement, exact line_label, exact year_label, and scope. Do not calculate or pass
+   value: the tool parses, scales, signs, and verifies the cited fiscal-year table cell
+   deterministically.
    Example evidence row: {{"kpi":"revenue","fiscal_year":2022,"status":"found",
    "value_verbatim":"6,858","unit_scale":"millions","unit_text":"(in millions)",
    "unit_page":42,"page":42,"statement":"Consolidated Statements of Income",
    "line_label":"Net revenue","year_label":"2022","scope":"consolidated total company"}}.
-   The tool checks the cited row and unit text; fix every field-level error it returns.
+   Finish all record batches derived from the current pages before starting a new retrieval. The
+   current page payload remains available across those batches. The tool checks the cited row and
+   unit text; fix every field-level error it returns.
 4. Use status=explicit_zero only when a matching printed row and fiscal-year cell contains a dash or
    "nil"; copy that marker into value_verbatim and provide the same evidence fields. Use
    status=absent with only kpi, fiscal_year, and status after the relevant primary statement has
    been checked and no row exists. Use status=ambiguous when competing rows cannot be resolved.
    These coverage rows prevent repeated searches but never become Ledger output values.
-5. Extract every supported KPI actually present for every fiscal-year column shown. The record tool
+5. Extract every supported KPI actually present for the report fiscal year only. The record tool
    computes monetary amounts in single currency units, scales share counts, converts cents/pence
-   EPS with unit_scale=currency_subunits_per_share, preserves reported signs, and makes capex and
-   dividends_paid positive outflows. Never derive an unprinted value.
+   EPS with unit_scale=currency_subunits_per_share, preserves reported signs, makes interest_expense
+   a positive cost, and makes capex and dividends_paid positive outflows. Never derive an unprinted
+   value.
 6. Keep KPI scopes distinct: parent-only equity and net income exclude NCI; unrestricted cash
    excludes restricted cash; total/current/noncurrent debt and short-term borrowings are not
-   interchangeable.
-7. Call query_multi_kpi_progress(view="kpis") once before submission to review normalized values and
-   coverage. Finish only by calling submit_multi_kpi_extraction. Normally pass kpis=[] so the tool
+   interchangeable. For capex, use only a printed cash-flow payment/purchase row; never substitute
+   PP&E-note "additions". For shares_outstanding, select the period-end number-of-shares cell, not
+   authorized shares, a currency amount, or weighted-average EPS shares.
+7. Call query_multi_kpi_progress(view="kpis") before submission to review normalized values and its
+   pending_kpis list. Do not submit normally until all 31 KPI keys have a coverage status. Finish
+   only by calling submit_multi_kpi_extraction. Normally pass kpis=[] so the tool
    builds the final result from recorded evidence; any last unrecorded kpis must use the same
    evidence format, never {{kpi,fiscal_year,value}}. The tool merges evidence, omits absent/ambiguous
    coverage, enforces the unchanged Ledger output schema, and stores both result and audit state.
@@ -230,6 +249,7 @@ def create_multi_kpi_agent() -> Agent:
         ],
         generate_content_config=genai_types.GenerateContentConfig(
             temperature=0,
+            max_output_tokens=MULTI_KPI_MAX_OUTPUT_TOKENS,
             tool_config=genai_types.ToolConfig(
                 function_calling_config=genai_types.FunctionCallingConfig(
                     mode=genai_types.FunctionCallingConfigMode.ANY,
