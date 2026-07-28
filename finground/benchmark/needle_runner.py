@@ -15,7 +15,8 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-from finground.agent import SETTINGS, create_needle_agent
+from finground.agents.common import SETTINGS
+from finground.agents.needle import create_needle_agent
 from finground.benchmark.concurrency import map_concurrently
 from finground.benchmark.llm_metrics import LlmCallCounterPlugin
 from finground.benchmark.parquet import NeedleCase, iter_needle_cases

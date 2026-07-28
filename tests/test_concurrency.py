@@ -119,6 +119,8 @@ def test_multi_runner_applies_concurrency_limit(tmp_path: Path, monkeypatch) -> 
         report,
         llm_counter,
         _budget_reminder,
+        _run_metrics,
+        _trajectory,
     ) -> tuple[dict, dict]:
         nonlocal active, peak
         active += 1
@@ -135,8 +137,7 @@ def test_multi_runner_applies_concurrency_limit(tmp_path: Path, monkeypatch) -> 
         audit = {
             **extraction,
             "kpis": [
-                {"kpi": kpi, "fiscal_year": report.year, "status": "absent"}
-                for kpi in KPI_KEYS
+                {"kpi": kpi, "fiscal_year": report.year, "status": "absent"} for kpi in KPI_KEYS
             ],
             "notes": [],
         }
@@ -155,28 +156,49 @@ def test_multi_runner_applies_concurrency_limit(tmp_path: Path, monkeypatch) -> 
     )
 
     assert len(list((output_dir / "raw").glob("*.json"))) == 4
+    assert len(list((output_dir / "trajectories").glob("*.jsonl"))) == 4
     first_record = json.loads(next((output_dir / "raw").glob("*.json")).read_text())
     assert first_record["audit"]["notes"] == []
+    assert first_record["execution_metrics"]["validation_error_count"] == 0
+    assert first_record["trajectory"]["complete"] is True
     assert peak == 2
     assert metadata["concurrency"] == 2
     assert metadata["total_llm_calls"] == 12
     assert metadata["llm_call_limit"] == 50
-    assert metadata["adk_run_call_limit"] == 41
-    assert metadata["prompt_version"] == "evidence-v5"
+    assert metadata["search_call_limit"] == 7
+    assert metadata["adk_run_call_limit"] == 50
+    assert metadata["prompt_version"] == "evidence-v8"
     assert metadata["ok"] == 4
     assert metadata["incomplete"] == 0
-    assert metadata["submission_deadline"] == 41
+    assert metadata["submission_deadline"] == 50
     assert metadata["max_output_tokens"] == 4_096
     assert metadata["total_prevented_early_stops"] == 0
+    assert metadata["execution_metrics"] == {
+        "tool_calls": {},
+        "tool_statuses": {},
+        "validation_error_count": 0,
+        "retryable_error_calls": 0,
+        "partial_success_calls": 0,
+        "repeated_validation_error_calls": 0,
+        "max_prompt_tokens": 0,
+    }
     assert metadata["budget_reminder_calls"] == [30, 40]
     assert len(metadata["report_ids"]) == 4
     assert metadata["context_management"] == {
         "adk_context_filter": "recorded_multi_kpi",
         "checkpoint_state": "multi_kpi_work_record",
-        "older_tool_payloads": "active_retrieval_retained_until_next_retrieval",
+        "older_tool_payloads": "single_active_retrieval_batch",
         "model_context_window_tokens": 131_072,
-        "compaction_token_threshold": 98_304,
-        "compaction_event_retention": 6,
+        "llm_event_summarization": False,
+    }
+    assert metadata["trajectory_logging"] == {
+        "enabled": True,
+        "format": "adk-lifecycle-events-jsonl",
+        "directory": str(output_dir / "trajectories"),
+        "content": "full_model_requests_responses_tool_calls_results_and_events",
+        "partial_suffix": ".partial",
+        "trajectories_complete": 4,
+        "write_errors": 0,
     }
 
     resumed = multi_runner.run_multi_kpi_sync(
@@ -199,6 +221,8 @@ def test_multi_runner_retains_llm_calls_when_report_fails(monkeypatch) -> None:
         _report,
         llm_counter,
         _budget_reminder,
+        _run_metrics,
+        _trajectory,
     ) -> dict:
         llm_counter.count += 4
         raise RuntimeError("model failed")
@@ -213,7 +237,13 @@ def test_multi_runner_retains_llm_calls_when_report_fails(monkeypatch) -> None:
 
 
 def test_multi_runner_marks_partial_submission_incomplete(monkeypatch) -> None:
-    async def fake_run_report(report, llm_counter, _budget_reminder) -> tuple[dict, dict]:
+    async def fake_run_report(
+        report,
+        llm_counter,
+        _budget_reminder,
+        _run_metrics,
+        _trajectory,
+    ) -> tuple[dict, dict]:
         llm_counter.count += 3
         extraction = {
             "ticker": report.ticker,
@@ -266,7 +296,5 @@ def test_multi_runner_builds_partial_extraction_from_validated_work_record() -> 
         "ticker": "ACME",
         "reporting_currency": "USD",
         "units_note": "millions",
-        "kpis": [
-            {"kpi": "revenue", "fiscal_year": 2023, "value": 123_000_000.0}
-        ],
+        "kpis": [{"kpi": "revenue", "fiscal_year": 2023, "value": 123_000_000.0}],
     }

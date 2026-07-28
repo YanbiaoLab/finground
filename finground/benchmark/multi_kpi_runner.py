@@ -6,8 +6,10 @@ import asyncio
 import hashlib
 import json
 import time
+from collections import Counter
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 from google.adk.agents.invocation_context import LlmCallsLimitExceededError
@@ -16,23 +18,23 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-from finground.agent import (
+from finground.agents.common import SETTINGS
+from finground.agents.multi_kpi import (
     MULTI_KPI_APP_NAME,
-    MULTI_KPI_COMPACTION_EVENT_RETENTION,
-    MULTI_KPI_COMPACTION_TOKEN_THRESHOLD,
     MULTI_KPI_CONTEXT_WINDOW_TOKENS,
     MULTI_KPI_FINAL_WARNING_CALL,
     MULTI_KPI_LLM_CALL_LIMIT,
     MULTI_KPI_MAX_OUTPUT_TOKENS,
     MULTI_KPI_PROGRESS_REMINDER_CALL,
     MULTI_KPI_PROMPT_VERSION,
+    MULTI_KPI_SEARCH_LIMIT,
     MULTI_KPI_SUBMISSION_DEADLINE,
-    SETTINGS,
     create_multi_kpi_app,
 )
+from finground.benchmark.adk_trajectory import AdkTrajectoryPlugin
 from finground.benchmark.concurrency import map_concurrently
 from finground.benchmark.llm_budget import MultiKpiExecutionGuardPlugin
-from finground.benchmark.llm_metrics import LlmCallCounterPlugin
+from finground.benchmark.llm_metrics import LlmCallCounterPlugin, MultiKpiRunMetricsPlugin
 from finground.benchmark.parquet import iter_multi_reports
 from finground.documents import Report
 from finground.kpis import KPI_KEYS
@@ -103,6 +105,8 @@ async def _run_report(
     report: Report,
     llm_counter: LlmCallCounterPlugin,
     execution_guard: MultiKpiExecutionGuardPlugin,
+    run_metrics: MultiKpiRunMetricsPlugin,
+    trajectory: AdkTrajectoryPlugin | None,
 ) -> tuple[dict, dict]:
     app_name = MULTI_KPI_APP_NAME
     user_id = "benchmark"
@@ -116,8 +120,11 @@ async def _run_report(
         session_id=session_id,
         state=state,
     )
+    plugins = [llm_counter, execution_guard, run_metrics]
+    if trajectory is not None:
+        plugins.append(trajectory)
     runner = Runner(
-        app=create_multi_kpi_app(plugins=[llm_counter, execution_guard]),
+        app=create_multi_kpi_app(plugins=plugins),
         session_service=session_service,
     )
     prompt = (
@@ -186,16 +193,35 @@ def _select_reports(
         yield report
 
 
-async def _process_report(report: Report) -> tuple[Report, dict]:
+async def _process_report(
+    report: Report,
+    *,
+    trajectory_dir: Path | None = None,
+) -> tuple[Report, dict]:
     started = time.monotonic()
     llm_counter = LlmCallCounterPlugin(
         max_calls=MULTI_KPI_LLM_CALL_LIMIT,
         force_tool_at_call=MULTI_KPI_SUBMISSION_DEADLINE,
         forced_tool_name="submit_multi_kpi_extraction",
     )
-    execution_guard = MultiKpiExecutionGuardPlugin(max_calls=MULTI_KPI_LLM_CALL_LIMIT)
+    execution_guard = MultiKpiExecutionGuardPlugin(
+        max_calls=MULTI_KPI_LLM_CALL_LIMIT,
+        max_searches=MULTI_KPI_SEARCH_LIMIT,
+    )
+    run_metrics = MultiKpiRunMetricsPlugin()
+    trajectory = (
+        AdkTrajectoryPlugin(trajectory_dir / f"{report.report_id}.jsonl")
+        if trajectory_dir is not None
+        else None
+    )
     try:
-        extraction, audit = await _run_report(report, llm_counter, execution_guard)
+        extraction, audit = await _run_report(
+            report,
+            llm_counter,
+            execution_guard,
+            run_metrics,
+            trajectory,
+        )
         covered = {
             item.get("kpi")
             for item in audit.get("kpis", [])
@@ -214,14 +240,13 @@ async def _process_report(report: Report) -> tuple[Report, dict]:
             "extraction": extraction,
             "audit": audit,
             "error": (
-                None
-                if complete
-                else f"incomplete KPI coverage: {len(pending_kpis)} pending"
+                None if complete else f"incomplete KPI coverage: {len(pending_kpis)} pending"
             ),
             "coverage_count": len(KPI_KEYS) - len(pending_kpis),
             "pending_kpis": pending_kpis,
             "llm_calls": llm_counter.count,
             "prevented_early_stops": execution_guard.prevented_early_stops,
+            "execution_metrics": run_metrics.snapshot(),
             "elapsed_s": round(time.monotonic() - started, 3),
         }
     except Exception as error:  # noqa: BLE001 - retain one record per report
@@ -240,8 +265,25 @@ async def _process_report(report: Report) -> tuple[Report, dict]:
             "pending_kpis": list(KPI_KEYS),
             "llm_calls": llm_counter.count,
             "prevented_early_stops": execution_guard.prevented_early_stops,
+            "execution_metrics": run_metrics.snapshot(),
             "elapsed_s": round(time.monotonic() - started, 3),
         }
+    if trajectory is not None:
+        trajectory.finish(
+            outcome=str(record["status"]),
+            summary={
+                "status": record["status"],
+                "coverage_count": record["coverage_count"],
+                "pending_kpis": record["pending_kpis"],
+                "llm_calls": record["llm_calls"],
+                "prevented_early_stops": record["prevented_early_stops"],
+                "elapsed_s": record["elapsed_s"],
+                "error": record["error"],
+            },
+        )
+        record["trajectory"] = trajectory.snapshot()
+    else:
+        record["trajectory"] = None
     return report, record
 
 
@@ -260,6 +302,7 @@ async def run_multi_kpi(
 
     raw_dir = output_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
+    trajectory_dir = output_dir / "trajectories"
 
     started = time.monotonic()
     processed = 0
@@ -268,6 +311,15 @@ async def run_multi_kpi(
     failed = 0
     total_llm_calls = 0
     total_prevented_early_stops = 0
+    total_validation_errors = 0
+    total_retryable_error_calls = 0
+    total_partial_success_calls = 0
+    total_repeated_validation_error_calls = 0
+    aggregate_tool_calls: Counter[str] = Counter()
+    aggregate_tool_statuses: Counter[str] = Counter()
+    max_prompt_tokens = 0
+    trajectories_complete = 0
+    trajectory_write_errors = 0
     selection_stats = _SelectionStats()
     selected_reports = _select_reports(
         reports,
@@ -279,12 +331,28 @@ async def run_multi_kpi(
     )
     async for report, record in map_concurrently(
         selected_reports,
-        _process_report,
+        partial(_process_report, trajectory_dir=trajectory_dir),
         limit=concurrency,
     ):
         processed += 1
         total_llm_calls += int(record["llm_calls"])
         total_prevented_early_stops += int(record["prevented_early_stops"])
+        execution_metrics = record["execution_metrics"]
+        total_validation_errors += int(execution_metrics["validation_error_count"])
+        total_retryable_error_calls += int(execution_metrics["retryable_error_calls"])
+        total_partial_success_calls += int(execution_metrics["partial_success_calls"])
+        total_repeated_validation_error_calls += int(
+            execution_metrics["repeated_validation_error_calls"]
+        )
+        aggregate_tool_calls.update(execution_metrics["tool_calls"])
+        aggregate_tool_statuses.update(execution_metrics["tool_statuses"])
+        max_prompt_tokens = max(
+            max_prompt_tokens,
+            int(execution_metrics["model_tokens"]["prompt_max"]),
+        )
+        trajectory = record["trajectory"]
+        trajectories_complete += int(bool(trajectory and trajectory["complete"]))
+        trajectory_write_errors += int(bool(trajectory and trajectory["write_error"]))
         _write_record(raw_dir / f"{report.report_id}.json", record)
         if record["status"] == "ok":
             ok += 1
@@ -297,6 +365,7 @@ async def run_multi_kpi(
         "model": SETTINGS.model,
         "prompt_version": MULTI_KPI_PROMPT_VERSION,
         "input_format": "parquet",
+        "reports_file": str(reports_file) if reports_file is not None else None,
         "reports_selected": len(selection_stats.report_ids),
         "reports_processed": processed,
         "reports_resumed": selection_stats.resumed,
@@ -306,7 +375,17 @@ async def run_multi_kpi(
         "failed": failed,
         "total_llm_calls": total_llm_calls,
         "total_prevented_early_stops": total_prevented_early_stops,
+        "execution_metrics": {
+            "tool_calls": dict(aggregate_tool_calls),
+            "tool_statuses": dict(aggregate_tool_statuses),
+            "validation_error_count": total_validation_errors,
+            "retryable_error_calls": total_retryable_error_calls,
+            "partial_success_calls": total_partial_success_calls,
+            "repeated_validation_error_calls": total_repeated_validation_error_calls,
+            "max_prompt_tokens": max_prompt_tokens,
+        },
         "llm_call_limit": MULTI_KPI_LLM_CALL_LIMIT,
+        "search_call_limit": MULTI_KPI_SEARCH_LIMIT,
         "adk_run_call_limit": MULTI_KPI_SUBMISSION_DEADLINE,
         "max_output_tokens": MULTI_KPI_MAX_OUTPUT_TOKENS,
         "submission_deadline": MULTI_KPI_SUBMISSION_DEADLINE,
@@ -318,10 +397,18 @@ async def run_multi_kpi(
         "context_management": {
             "adk_context_filter": "recorded_multi_kpi",
             "checkpoint_state": "multi_kpi_work_record",
-            "older_tool_payloads": "active_retrieval_retained_until_next_retrieval",
+            "older_tool_payloads": "single_active_retrieval_batch",
             "model_context_window_tokens": MULTI_KPI_CONTEXT_WINDOW_TOKENS,
-            "compaction_token_threshold": MULTI_KPI_COMPACTION_TOKEN_THRESHOLD,
-            "compaction_event_retention": MULTI_KPI_COMPACTION_EVENT_RETENTION,
+            "llm_event_summarization": False,
+        },
+        "trajectory_logging": {
+            "enabled": True,
+            "format": "adk-lifecycle-events-jsonl",
+            "directory": str(trajectory_dir),
+            "content": "full_model_requests_responses_tool_calls_results_and_events",
+            "partial_suffix": ".partial",
+            "trajectories_complete": trajectories_complete,
+            "write_errors": trajectory_write_errors,
         },
         "elapsed_s": round(time.monotonic() - started, 3),
         "ground_truth_used_for_prediction": False,

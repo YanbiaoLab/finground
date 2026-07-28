@@ -36,10 +36,20 @@ STATEMENT_HEADING_TERMS = {
     "balance_sheet": (
         "consolidated balance sheet",
         "consolidated balance sheets",
+        "consolidated statement of financial position",
+        "consolidated statements of financial position",
         "statement of financial position",
         "statements of financial position",
     ),
     "cash_flow_statement": (
+        "consolidated statement of cash flows",
+        "consolidated statements of cash flows",
+        "consolidated cash flow statement",
+        "consolidated cash flow statements",
+        "condensed consolidated statement of cash flows",
+        "condensed consolidated statements of cash flows",
+        "statement of consolidated cash flows",
+        "statements of consolidated cash flows",
         "statement of cash flows",
         "statements of cash flows",
         "cash flow statement",
@@ -187,10 +197,7 @@ def _has_statement_title(page_text: str, terms: tuple[str, ...]) -> bool:
         normalized_line = _normalized_text(line).lstrip("# ")
         if any(
             normalized_line == term
-            or (
-                normalized_line.startswith(term)
-                and len(normalized_line) <= len(term) + 80
-            )
+            or (normalized_line.startswith(term) and len(normalized_line) <= len(term) + 80)
             for term in terms
         ):
             return True
@@ -198,7 +205,7 @@ def _has_statement_title(page_text: str, terms: tuple[str, ...]) -> bool:
 
 
 def _classified_statement_pages(pages: list[Page]) -> dict[str, list[int]]:
-    candidates: dict[str, list[tuple[int, int]]] = {
+    candidates: dict[str, list[tuple[int, int, bool]]] = {
         statement: [] for statement in STATEMENT_HEADING_TERMS
     }
     for page in pages:
@@ -219,22 +226,30 @@ def _classified_statement_pages(pages: list[Page]) -> dict[str, list[int]]:
                 term in page_text for term in STATEMENT_STRUCTURE_TERMS[statement]
             )
             if title_match or (
-                has_table
-                and structure_score >= STATEMENT_STRUCTURE_THRESHOLDS[statement]
+                has_table and structure_score >= STATEMENT_STRUCTURE_THRESHOLDS[statement]
             ):
                 candidates[statement].append(
                     (
                         (20 if title_match else 0) + structure_score,
                         page.display_number,
+                        title_match,
                     )
                 )
-    return {
-        statement: [
+    classified: dict[str, list[int]] = {}
+    for statement, items in candidates.items():
+        ranked = sorted(items, key=lambda item: (-item[0], item[1]))
+        if not ranked:
+            classified[statement] = []
+            continue
+        primary_page = ranked[0][1]
+        selected = {primary_page}
+        selected.update(
             page
-            for _score, page in sorted(items, key=lambda item: (-item[0], item[1]))[:1]
-        ]
-        for statement, items in candidates.items()
-    }
+            for _score, page, title_match in ranked[1:]
+            if title_match and abs(page - primary_page) == 1
+        )
+        classified[statement] = sorted(selected)[:MAX_READ_PAGES]
+    return classified
 
 
 def get_report_info(tool_context: ToolContext) -> dict:
@@ -269,8 +284,33 @@ def _matched_phrases(text: str, phrases: list[str]) -> list[str]:
     return [phrase for phrase in phrases if phrase.casefold() in lowered]
 
 
+def _logical_source_lines(text: str) -> list[str]:
+    """Split compact HTML tables into row-sized lines without altering source tags."""
+    structured = re.sub(r"</tr>\s*", "</tr>\n", text, flags=re.IGNORECASE)
+    structured = re.sub(r"</table>\s*", "</table>\n", structured, flags=re.IGNORECASE)
+    return structured.splitlines()
+
+
+def _truncate_around_match(text: str, terms: list[str], limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    lowered = text.casefold()
+    positions = [
+        position
+        for term in terms
+        if term
+        for position in [lowered.find(term.casefold())]
+        if position >= 0
+    ]
+    if not positions:
+        return text[:limit]
+    match_position = min(positions)
+    start = max(0, match_position - limit // 3)
+    return text[start : start + limit]
+
+
 def _search_snippet(text: str, query: str, phrases: list[str]) -> str:
-    lines = text.splitlines()
+    lines = _logical_source_lines(text)
     if not lines:
         return ""
     lowered_phrases = [phrase.casefold() for phrase in phrases]
@@ -285,7 +325,14 @@ def _search_snippet(text: str, query: str, phrases: list[str]) -> str:
     best_index = max(range(len(lines)), key=lambda index: line_score(lines[index]))
     start = max(0, best_index - FOCUS_CONTEXT_LINES)
     end = min(len(lines), best_index + FOCUS_CONTEXT_LINES + 1)
-    return "\n".join(lines[start:end]).strip()[:MAX_SEARCH_SNIPPET_CHARS]
+    header = lines[: min(FOCUS_CONTEXT_LINES, start)]
+    window = lines[start:end]
+    snippet = "\n...\n".join(chunk for chunk in ("\n".join(header), "\n".join(window)) if chunk)
+    return _truncate_around_match(
+        snippet.strip(),
+        [*phrases, *query_tokens],
+        MAX_SEARCH_SNIPPET_CHARS,
+    )
 
 
 def search_report(
@@ -348,7 +395,7 @@ def search_report(
 
 
 def _focused_page_text(text: str, phrases: list[str]) -> tuple[str, list[str], bool]:
-    lines = text.splitlines()
+    lines = _logical_source_lines(text)
     matching_indexes = [
         index
         for index, line in enumerate(lines)
@@ -358,6 +405,7 @@ def _focused_page_text(text: str, phrases: list[str]) -> tuple[str, list[str], b
         return "", [], False
 
     selected_indexes: set[int] = set()
+    selected_indexes.update(range(min(FOCUS_CONTEXT_LINES, len(lines))))
     for index in matching_indexes:
         selected_indexes.update(
             range(
@@ -375,7 +423,7 @@ def _focused_page_text(text: str, phrases: list[str]) -> tuple[str, list[str], b
     focused = "\n".join(chunks).strip()
     truncated = len(focused) > MAX_FOCUSED_TEXT_CHARS
     return (
-        focused[:MAX_FOCUSED_TEXT_CHARS],
+        _truncate_around_match(focused, phrases, MAX_FOCUSED_TEXT_CHARS),
         _matched_phrases(text, phrases),
         truncated,
     )

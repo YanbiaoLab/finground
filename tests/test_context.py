@@ -94,7 +94,7 @@ def test_context_filter_keeps_active_page_across_multiple_record_batches() -> No
     assert large_page in str(filtered[2].parts[0].function_response.response)
 
 
-def test_context_filter_keeps_history_until_progress_is_recorded() -> None:
+def test_context_filter_keeps_the_only_active_retrieval() -> None:
     contents = [
         types.Content(role="user", parts=[types.Part(text="Extract KPIs")]),
         _call("read_report_pages", "read-1", {"page_numbers": [10]}),
@@ -106,6 +106,75 @@ def test_context_filter_keeps_history_until_progress_is_recorded() -> None:
     ]
 
     assert filter_recorded_multi_kpi_context(contents) is contents
+
+
+def test_context_filter_preserves_report_metadata_after_page_retrieval() -> None:
+    contents = [
+        types.Content(role="user", parts=[types.Part(text="Extract KPIs")]),
+        _call("get_report_info", "info-1", {}),
+        _response(
+            "get_report_info",
+            "info-1",
+            {
+                "status": "success",
+                "ticker": "ACME",
+                "fiscal_year": 2023,
+                "statement_pages": {"income_statement": [10]},
+            },
+        ),
+        _call("read_report_pages", "read-1", {"page_numbers": [10]}),
+        _response(
+            "read_report_pages",
+            "read-1",
+            {"status": "success", "pages": [{"page": 10, "text": "old table"}]},
+        ),
+        _call("read_report_pages", "read-2", {"page_numbers": [20]}),
+        _response(
+            "read_report_pages",
+            "read-2",
+            {"status": "success", "pages": [{"page": 20, "text": "current table"}]},
+        ),
+    ]
+
+    filtered = filter_recorded_multi_kpi_context(contents)
+
+    assert filtered[1].parts[0].function_call.args == {}
+    assert filtered[2].parts[0].function_response.response["ticker"] == "ACME"
+    assert filtered[4].parts[0].function_response.response["status"] == "compacted"
+
+
+def test_context_filter_compacts_old_retrieval_after_validation_failure() -> None:
+    contents = [
+        types.Content(role="user", parts=[types.Part(text="Extract KPIs")]),
+        _call("read_report_pages", "read-1", {"page_numbers": [10]}),
+        _response(
+            "read_report_pages",
+            "read-1",
+            {"status": "success", "pages": [{"page": 10, "text": "old table"}]},
+        ),
+        _call("record_multi_kpi_progress", "record-1", {"kpis": []}),
+        _response(
+            "record_multi_kpi_progress",
+            "record-1",
+            {
+                "status": "error",
+                "retryable": True,
+                "validation_errors": [{"field": "kpis.0.page", "message": "bad page"}],
+            },
+        ),
+        _call("search_report", "search-2", {"query": "debt", "phrases": ["debt"]}),
+        _response(
+            "search_report",
+            "search-2",
+            {"status": "success", "results": [{"page": 20, "snippet": "new source"}]},
+        ),
+    ]
+
+    filtered = filter_recorded_multi_kpi_context(contents)
+
+    assert filtered[2].parts[0].function_response.response["status"] == "compacted"
+    assert filtered[4].parts[0].function_response.response["status"] == "compacted"
+    assert filtered[6].parts[0].function_response.response["results"][0]["page"] == 20
 
 
 def test_context_filter_treats_partially_successful_record_as_progress() -> None:

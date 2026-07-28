@@ -4,26 +4,26 @@ from types import SimpleNamespace
 
 from google.adk.models.lite_llm import LiteLlm
 
-import finground.agent as agent_module
-from finground.agent import (
-    MULTI_KPI_COMPACTION_TOKEN_THRESHOLD,
+import finground.agents as agents_package
+from finground.agents.common import create_adk_model
+from finground.agents.multi_kpi import (
     MULTI_KPI_CONTEXT_WINDOW_TOKENS,
     MULTI_KPI_FINAL_WARNING_CALL,
     MULTI_KPI_LLM_CALL_LIMIT,
     MULTI_KPI_MAX_OUTPUT_TOKENS,
     MULTI_KPI_PROGRESS_REMINDER_CALL,
+    MULTI_KPI_SEARCH_LIMIT,
     MULTI_KPI_SUBMISSION_DEADLINE,
-    create_adk_model,
     create_multi_kpi_agent,
     create_multi_kpi_app,
-    create_needle_agent,
 )
+from finground.agents.needle import create_needle_agent
 from finground.config import load_settings
 
 
 def test_agent_core_does_not_import_benchmark_package() -> None:
-    package_dir = Path(agent_module.__file__).parent
-    for path in package_dir.glob("*.py"):
+    package_dir = Path(agents_package.__file__).parent
+    for path in package_dir.rglob("*.py"):
         if path.name == "__main__.py":
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -69,7 +69,7 @@ def test_non_deepseek_model_remains_native_adk_name() -> None:
 
 def test_qwen_model_uses_local_vllm_openai_compatible_endpoint(monkeypatch) -> None:
     monkeypatch.setattr(
-        "finground.agent.SETTINGS",
+        "finground.agents.common.SETTINGS",
         SimpleNamespace(
             vllm_base_url="http://vllm.test:8000/v1",
             vllm_api_key="test-key",
@@ -124,14 +124,20 @@ def test_multi_kpi_agent_exposes_state_and_submission_tools() -> None:
     }
     assert "correct every" in agent.instruction
     assert MULTI_KPI_LLM_CALL_LIMIT == 50
-    assert f"At model call {MULTI_KPI_PROGRESS_REMINDER_CALL}" in agent.instruction
-    assert f"At call {MULTI_KPI_FINAL_WARNING_CALL}" in agent.instruction
-    assert f"Call {MULTI_KPI_SUBMISSION_DEADLINE} is restricted" in agent.instruction
+    assert MULTI_KPI_PROGRESS_REMINDER_CALL == 30
+    assert MULTI_KPI_SEARCH_LIMIT == 7
+    assert MULTI_KPI_FINAL_WARNING_CALL == 40
+    assert MULTI_KPI_SUBMISSION_DEADLINE == 50
+    assert "Balance evidence-supported recall and precision" in agent.instruction
     assert "Missing means omitting" in agent.instruction
-    assert "report fiscal year only" in agent.instruction
-    assert "more than 8 KPI rows" in agent.instruction
-    assert "all 31 KPI keys have a coverage status" in agent.instruction
-    assert "exactly one tool call" in agent.instruction
+    assert "report fiscal year" in agent.instruction
+    assert "8 KPI rows per record call" in agent.instruction
+    assert "Do not let one rejected row block the next primary statement" in agent.instruction
+    assert "normal submission by call 35" in agent.instruction
+    assert "Calls 40-49 are closure-only" in agent.instruction
+    assert "same statement" in agent.instruction
+    assert "single-KPI fallback" in agent.instruction
+    assert "coverage for all 31 KPI keys" in agent.instruction
     assert MULTI_KPI_MAX_OUTPUT_TOKENS == 4_096
     assert agent.generate_content_config.max_output_tokens == 4_096
     function_config = agent.generate_content_config.tool_config.function_calling_config
@@ -139,9 +145,9 @@ def test_multi_kpi_agent_exposes_state_and_submission_tools() -> None:
     record_tool = next(
         tool for tool in agent.tools if getattr(tool, "name", None) == "record_multi_kpi_progress"
     )
-    evidence_schema = record_tool._get_declaration().parameters_json_schema["properties"][
-        "kpis"
-    ]["items"]
+    evidence_schema = record_tool._get_declaration().parameters_json_schema["properties"]["kpis"][
+        "items"
+    ]
     assert evidence_schema["properties"]["status"]["enum"] == [
         "found",
         "explicit_zero",
@@ -149,19 +155,16 @@ def test_multi_kpi_agent_exposes_state_and_submission_tools() -> None:
         "ambiguous",
     ]
     assert "value" not in evidence_schema["properties"]
-    assert record_tool._get_declaration().parameters_json_schema["properties"]["kpis"][
-        "maxItems"
-    ] == 8
+    assert (
+        record_tool._get_declaration().parameters_json_schema["properties"]["kpis"]["maxItems"] == 8
+    )
 
 
-def test_multi_kpi_app_enables_adk_context_filter_and_compaction() -> None:
+def test_multi_kpi_app_uses_deterministic_context_filter_without_llm_compaction() -> None:
     app = create_multi_kpi_app()
 
     assert app.name == "finground_multi_kpi"
     assert len(app.plugins) == 1
     assert app.plugins[0].name == "context_filter_plugin"
-    assert app.events_compaction_config is not None
+    assert app.events_compaction_config is None
     assert MULTI_KPI_CONTEXT_WINDOW_TOKENS == 131_072
-    assert MULTI_KPI_COMPACTION_TOKEN_THRESHOLD == 98_304
-    assert app.events_compaction_config.token_threshold == 98_304
-    assert app.events_compaction_config.event_retention_size == 6

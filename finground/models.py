@@ -198,20 +198,14 @@ class MultiKpiEvidenceCandidate(BaseModel):
             required = {
                 "value_verbatim": self.value_verbatim,
                 "page": self.page,
-                "statement": self.statement,
                 "line_label": self.line_label,
                 "year_label": self.year_label,
-                "scope": self.scope,
             }
             missing = [name for name, value in required.items() if value is None]
             if missing:
-                raise ValueError(
-                    f"{self.status} evidence requires: {', '.join(missing)}"
-                )
+                raise ValueError(f"{self.status} evidence requires: {', '.join(missing)}")
             if self.unit_scale in {None, "unknown"} and self.unit_text is None:
-                raise ValueError(
-                    f"{self.status} evidence requires unit_scale or exact unit_text"
-                )
+                raise ValueError(f"{self.status} evidence requires unit_scale or exact unit_text")
             if self.unit_text is not None and self.unit_page is None:
                 raise ValueError("unit_text requires unit_page")
         elif self.status == "absent":

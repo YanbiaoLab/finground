@@ -9,7 +9,7 @@ from html import unescape
 from typing import Any
 
 from google.adk.tools import ToolContext
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 
 from finground.kpis import KPI_KEYS, POSITIVE_MAGNITUDE_KPIS, POSITIVE_OUTFLOW_KPIS
 from finground.models import (
@@ -44,8 +44,6 @@ MULTI_KPI_RESULT_STATE_KEY = "multi_kpi_result"
 MULTI_KPI_AUDIT_STATE_KEY = "multi_kpi_audit"
 MULTI_KPI_ALLOW_PARTIAL_STATE_KEY = "temp:multi_kpi_allow_partial_submission"
 
-_EVIDENCE_CANDIDATES = TypeAdapter(list[MultiKpiEvidenceCandidate])
-_MULTI_KPI_NOTES = TypeAdapter(list[MultiKpiNote])
 _EXPLICIT_ZERO_MARKERS = {"-", "−", "–", "—", "nil"}
 MAX_MULTI_KPI_RECORD_ROWS = 8
 
@@ -117,8 +115,7 @@ def _validation_error_response(
         "validation_errors": [
             {
                 "field": ".".join(
-                    str(part)
-                    for part in ((prefix,) if prefix is not None else ()) + item["loc"]
+                    str(part) for part in ((prefix,) if prefix is not None else ()) + item["loc"]
                 ),
                 "message": item["msg"],
             }
@@ -326,30 +323,31 @@ def _normalize_multi_kpi_candidates(
     pages: list[Any],
     report_year: int,
 ) -> tuple[list[MultiKpiEvidence], list[dict[str, str]], list[dict[str, Any]]]:
-    try:
-        candidates = _EVIDENCE_CANDIDATES.validate_python(raw_candidates)
-    except ValidationError as error:
-        response = _validation_error_response(
-            error,
-            "KPI evidence does not match the work-record schema",
-            prefix="kpis",
-        )
-        return [], response["validation_errors"], []
-
     errors: list[dict[str, str]] = []
+    candidates: list[tuple[int, MultiKpiEvidenceCandidate]] = []
+    for index, raw_candidate in enumerate(raw_candidates):
+        try:
+            candidates.append((index, MultiKpiEvidenceCandidate.model_validate(raw_candidate)))
+        except ValidationError as error:
+            response = _validation_error_response(
+                error,
+                "KPI evidence does not match the work-record schema",
+                prefix=f"kpis.{index}",
+            )
+            errors.extend(response["validation_errors"])
+
     corrections: list[dict[str, Any]] = []
     normalized: list[MultiKpiEvidence] = []
     page_by_number = {page.display_number: page.text for page in pages}
     seen: set[tuple[str, int]] = set()
-    for index, candidate in enumerate(candidates):
+    for index, candidate in candidates:
         key = (candidate.kpi, candidate.fiscal_year)
         if key in seen:
             errors.append(
                 {
                     "field": f"kpis.{index}",
                     "message": (
-                        f"duplicate KPI/year coverage row: "
-                        f"{candidate.kpi}/{candidate.fiscal_year}"
+                        f"duplicate KPI/year coverage row: {candidate.kpi}/{candidate.fiscal_year}"
                     ),
                 }
             )
@@ -381,6 +379,7 @@ def _normalize_multi_kpi_candidates(
                 }
             )
             continue
+        evidence_error_count = len(errors)
         if candidate.year_label and candidate.year_label.casefold() not in page_text.casefold():
             errors.append(
                 {
@@ -407,6 +406,32 @@ def _normalize_multi_kpi_candidates(
                         "message": "unit_text was not found on unit_page",
                     }
                 )
+
+        if candidate.unit_text is None and candidate.unit_scale in {
+            "thousands",
+            "millions",
+            "billions",
+        }:
+            errors.append(
+                {
+                    "field": f"kpis.{index}.unit_text",
+                    "message": "scaled values require exact visible unit_text and unit_page",
+                }
+            )
+        elif candidate.unit_text is None and candidate.unit_scale == "units":
+            visible_header_scale = detect_scale(page_text[:2_000], candidate.kpi)
+            if visible_header_scale in {"thousands", "millions", "billions"}:
+                errors.append(
+                    {
+                        "field": f"kpis.{index}.unit_text",
+                        "message": (
+                            f"cited page header indicates {visible_header_scale}; copy its exact "
+                            "unit_text and unit_page instead of using units"
+                        ),
+                    }
+                )
+        if len(errors) > evidence_error_count:
+            continue
 
         scale, scale_source = _resolve_multi_kpi_scale(candidate)
         if scale is None:
@@ -545,9 +570,7 @@ def _work_record_counts(work_record: MultiKpiWorkRecord) -> tuple[int, Counter[s
 
 
 def _pending_multi_kpis(work_record: MultiKpiWorkRecord, report_year: int) -> list[str]:
-    covered = {
-        item.kpi for item in work_record.kpis if item.fiscal_year == report_year
-    }
+    covered = {item.kpi for item in work_record.kpis if item.fiscal_year == report_year}
     return [kpi for kpi in KPI_KEYS if kpi not in covered]
 
 
@@ -559,6 +582,33 @@ def _load_multi_kpi_work_record(tool_context: ToolContext) -> MultiKpiWorkRecord
         return MultiKpiWorkRecord.model_validate(raw_record)
     except ValidationError as error:
         raise RuntimeError("multi-KPI work record in session state is invalid") from error
+
+
+def _evidence_repair_queue(
+    candidates: list[MultiKpiEvidenceCandidate],
+    errors: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    indexed_errors: dict[int, list[dict[str, str]]] = {}
+    for error in errors:
+        match = re.match(r"^kpis\.(\d+)\.", error.get("field", ""))
+        if match is not None:
+            indexed_errors.setdefault(int(match.group(1)), []).append(error)
+    repair_queue = []
+    for index, validation_errors in sorted(indexed_errors.items()):
+        if index >= len(candidates):
+            continue
+        candidate = candidates[index]
+        kpi = candidate.kpi if isinstance(candidate, MultiKpiEvidenceCandidate) else None
+        if kpi is None and isinstance(candidate, dict):
+            kpi = candidate.get("kpi")
+        repair_queue.append(
+            {
+                "index": index,
+                "kpi": kpi,
+                "validation_errors": validation_errors,
+            }
+        )
+    return repair_queue
 
 
 def record_multi_kpi_progress(
@@ -574,12 +624,12 @@ def record_multi_kpi_progress(
         reporting_currency: Three-letter uppercase reporting currency, or null if still unknown.
         units_note: Short note describing observed statement scale, or null.
         kpis: Evidence/coverage rows. A found row uses kpi, fiscal_year, status="found",
-            exact value_verbatim, page, statement, line_label, year_label, scope, and either exact
-            unit_text plus unit_page or unit_scale. Do not pass a calculated value: this tool
-            parses, scales, and signs it. Use status="explicit_zero" only for a printed dash/nil
-            on the matching row and year. Use status="absent" or "ambiguous" without a value for
-            unresolved coverage; those rows are retained for work tracking and omitted from the
-            final LEDGER output.
+            exact value_verbatim, page, line_label, year_label, and unit evidence. Exact unit_text
+            plus unit_page is required for thousands/millions/billions. statement and scope are
+            optional audit fields. Do not pass a calculated value: this tool parses, scales, and
+            signs it. Use status="explicit_zero" only for a printed dash/nil on the matching row
+            and year. Use status="absent" or "ambiguous" without a value for unresolved coverage;
+            those rows are retained for work tracking and omitted from the final LEDGER output.
         notes: Durable observations with category, text, and relevant report page numbers. Use
             categories evidence, unit, scope, decision, todo, or warning.
 
@@ -604,44 +654,48 @@ def record_multi_kpi_progress(
             error,
             "progress does not match the Multi-KPI work-record schema",
         )
-    try:
-        incoming_notes = _MULTI_KPI_NOTES.validate_python(notes)
-    except ValidationError as error:
-        return _validation_error_response(
-            error,
-            "notes do not match the Multi-KPI work-record schema",
-            prefix="notes",
-        )
+    note_errors: list[dict[str, str]] = []
+    indexed_notes: list[tuple[int, MultiKpiNote]] = []
+    for note_index, raw_note in enumerate(notes):
+        try:
+            indexed_notes.append((note_index, MultiKpiNote.model_validate(raw_note)))
+        except ValidationError as error:
+            response = _validation_error_response(
+                error,
+                "note does not match the Multi-KPI work-record schema",
+                prefix=f"notes.{note_index}",
+            )
+            note_errors.extend(response["validation_errors"])
     incoming_kpis, evidence_errors, corrections = _normalize_multi_kpi_candidates(
         kpis,
         pages,
         int(report.get("year", 0)),
     )
-    errors = _multi_kpi_submission_errors(metadata, report)
+    metadata_errors = _multi_kpi_submission_errors(metadata, report)
+    if metadata_errors:
+        metadata = metadata.model_copy(update={"reporting_currency": None})
     valid_pages = {page.display_number for page in pages}
-    for note_index, note in enumerate(incoming_notes):
+    valid_notes: list[MultiKpiNote] = []
+    for note_index, note in indexed_notes:
         missing_pages = [page for page in note.pages if page not in valid_pages]
         if missing_pages:
-            errors.append(
+            note_errors.append(
                 {
                     "field": f"notes.{note_index}.pages",
                     "message": f"pages do not exist in the report: {missing_pages}",
                 }
             )
-    if errors:
-        return {
-            "status": "error",
-            "retryable": True,
-            "error": "progress record failed basic data checks",
-            "validation_errors": [*errors, *evidence_errors],
-        }
+        else:
+            valid_notes.append(note)
+    incoming_notes = valid_notes
+    recoverable_errors = [*metadata_errors, *note_errors, *evidence_errors]
     if (
         not incoming_kpis
         and not incoming_notes
         and metadata.reporting_currency is None
         and metadata.units_note is None
     ):
-        validation_errors = evidence_errors or [
+        validation_errors = recoverable_errors or [
             {
                 "field": "record",
                 "message": "record at least one KPI, note, currency, or units observation",
@@ -652,6 +706,8 @@ def record_multi_kpi_progress(
             "retryable": True,
             "error": "progress record failed basic data checks",
             "validation_errors": validation_errors,
+            "accepted_kpis": [],
+            "repair_queue": _evidence_repair_queue(kpis, validation_errors),
         }
 
     work_record = _load_multi_kpi_work_record(tool_context)
@@ -703,7 +759,7 @@ def record_multi_kpi_progress(
     extracted_count, status_counts = _work_record_counts(combined)
     pending_kpis = _pending_multi_kpis(combined, int(report.get("year", 0)))
     response = {
-        "status": "partial_success" if evidence_errors else "success",
+        "status": "partial_success" if recoverable_errors else "success",
         "kpi_count": extracted_count,
         "coverage_count": len(combined.kpis),
         "pending_count": len(pending_kpis),
@@ -715,12 +771,14 @@ def record_multi_kpi_progress(
         "added_note_count": len(added_notes),
         "normalization_corrections": corrections,
     }
-    if evidence_errors:
+    if recoverable_errors:
         response.update(
             {
                 "retryable": True,
-                "error": "valid progress was saved; correct the rejected KPI rows",
-                "validation_errors": evidence_errors,
+                "error": "valid progress was saved; correct only the rejected fields",
+                "validation_errors": recoverable_errors,
+                "accepted_kpis": [item.kpi for item in incoming_kpis],
+                "repair_queue": _evidence_repair_queue(kpis, evidence_errors),
             }
         )
     return response

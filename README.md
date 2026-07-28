@@ -37,15 +37,16 @@ Any model name beginning with `qwen` (case-insensitive) uses the configured
 vLLM endpoint. A model name beginning with `deepseek-` uses LiteLLM's DeepSeek
 provider. Other model names are passed directly to Google ADK.
 
-The Multi-KPI agent is configured for a 128k-token model context window. ADK
-event compaction starts at 98,304 tokens, retaining 25% of the window for the
-system prompt, tool declarations, and the next model response. Each successful
-`record_multi_kpi_progress` call checkpoints validated evidence in session
-state; older search and page payloads are then removed from subsequent model
-requests while the immutable report remains available through tools. Qwen
-thinking and parallel tool calls are disabled, and each model turn has a
-4,096-token output budget so structured tool arguments can finish without
-being truncated.
+The Multi-KPI agent is configured for a 128k-token model context window. Each
+successful `record_multi_kpi_progress` call checkpoints validated evidence in
+session state. A deterministic ADK context filter keeps compact report metadata
+and the active source batch while removing older search and page payloads; the
+immutable report remains available through tools. A single-agent execution
+guard exposes only the tools valid for the current metadata, source-read,
+checkpoint, repair, closure, or submission phase, and prevents repeated actions
+at unchanged KPI coverage. Qwen thinking and parallel tool calls are disabled,
+and each model turn has a 4,096-token output budget so structured tool arguments
+can finish without being truncated.
 
 ## Download the datasets
 
@@ -116,7 +117,7 @@ uv run finground ledger-multi \
   --parquet data/ledger/raw/multi_kpi/eval/data.parquet \
   --output-dir outputs/ledger/multi-eval \
   --limit-reports 10 \
-  --concurrency 4
+  --concurrency 20
 
 uv run finground ledger-score-multi \
   --output-dir outputs/ledger/multi-eval \
@@ -131,6 +132,27 @@ Each report produces `raw/<report_id>.json`. `run_meta.json` records the exact
 run scope, model, call counts, concurrency, and failures. Scoring adds
 `summary.md`, `predictions_long.csv`, and per-dimension metric CSV files to the
 same output directory.
+
+For the fixed representative 20-report 2017 trace set:
+
+```bash
+uv run finground ledger-multi \
+  --parquet data/ledger/raw/multi_kpi/eval/data.parquet \
+  --reports-file tests/fixtures/ledger/eval-2017-trace-20.txt \
+  --output-dir outputs/ledger/multi-eval-2017-v8-trace20-c20 \
+  --concurrency 20
+
+uv run finground ledger-score-multi \
+  --output-dir outputs/ledger/multi-eval-2017-v8-trace20-c20 \
+  --parquet data/ledger/raw/multi_kpi/eval/data.parquet
+```
+
+Every processed report also writes
+`trajectories/<report_id>.jsonl`. These JSONL files contain the full ADK
+lifecycle: effective model requests and responses, tool arguments and results,
+yielded events (including state deltas), token usage, lifecycle callbacks, and
+errors. Records are flushed incrementally to `.jsonl.partial` and renamed after
+the report finishes, so an interrupted run still retains its partial trajectory.
 
 ## Run Needle extraction
 
@@ -165,23 +187,27 @@ uv run finground ledger-needle --help
 uv run finground ledger-score-needle --help
 ```
 
-`--concurrency N` limits the number of active ADK sessions. Lower it when the
-model server cannot sustain the request volume. Scoring defaults to a 1%
-relative match tolerance; use each scoring command's help to inspect or override
-its tolerance options.
+`--concurrency N` limits the number of active ADK sessions. Formal Multi-KPI
+evaluation runs use `--concurrency 20`; small smoke and diagnostic runs may use a
+lower value. Scoring defaults to a 1% relative match tolerance; use each scoring
+command's help to inspect or override its tolerance options.
 
 ## Code layout
 
 ```text
-finground/             agent construction, models, tools, report access, and retrieval
+finground/agents/      shared model setup plus separate Needle and Multi-KPI agents
+finground/             models, tools, report access, and retrieval
 finground/tools/       state-backed report, work-record, and submission tools
 finground/benchmark/   Parquet readers, ADK runners, CLI, and local scorers
 tests/                 unit and end-to-end scorer tests
 outputs/ledger/        generated run artifacts (Git-ignored)
 ```
 
-Agent construction and tools remain under `finground/`. The benchmark package
-owns dataset adaptation, ADK runner/session lifecycle, output files, and scoring.
+Agent construction is split by task under `finground/agents/`. The benchmark
+package owns dataset adaptation, ADK runner/session lifecycle, output files, and
+scoring. Multi-KPI changes, baselines, trajectory findings, and the next
+optimization experiments are tracked in
+[`docs/multi-kpi-optimization-log.md`](docs/multi-kpi-optimization-log.md).
 
 ## Verify the repository
 
