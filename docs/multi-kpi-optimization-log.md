@@ -20,7 +20,7 @@
 正式评估并行度固定为 20。单份或两份 smoke 可以降低并行度用于诊断，但不能替代
 固定 20 份回归。只有通过该回归集的改动才进入 76 份 2017 报告评估。
 
-## 当前基线：evidence-v7
+## 历史基线：evidence-v7
 
 评估日期：2026-07-28
 
@@ -97,9 +97,14 @@ agent 调用上限：每份报告 50 次
 
 日期：2026-07-28
 
-状态：两例 smoke 通过，等待固定 20 份评估
+状态：固定 20 份评估完成，保留
 
 prompt 版本：`evidence-v8`
+
+代码版本：
+
+- `2afe004`：agent 拆分、完整 ADK 轨迹、显式工作流、上下文和有限修复。
+- `ce3caa8`：Multi-KPI 正式评估默认并行度调整为 20。
 
 为什么改：
 
@@ -147,20 +152,65 @@ prompt 版本：`evidence-v8`
 结论：
 
 - 保留显式阶段、动作去重、40 次 closure 和 7 次搜索上限。
-- FLOW、CTX、CLOSE 的 smoke 验证达到目标；尚不能在 20 份结果出来前标记最终完成。
+- FLOW、CTX、CLOSE 的 smoke 验证达到目标；固定 20 份结果见下一节。
 - validation errors 仅下降 4%，下一轮主目标转为 EVID-001：减少行、年份和单位字段
   对齐错误，而不是继续增加流程限制。
+
+## 当前评估版本：evidence-v8
+
+评估日期：2026-07-28
+
+代码版本：`ce3caa8`
+
+prompt 版本：`evidence-v8`
+
+并行度：20
+
+有效输出：
+`outputs/ledger/multi-eval-2017-v8-trace20-c20-ce3caa8-r2`
+
+首次运行
+`outputs/ledger/multi-eval-2017-v8-trace20-c20-ce3caa8`
+因沙箱无法连接远端 vLLM，20 份报告均在第一次模型调用失败；该运行只作为基础设施
+失败证据保留，不参与质量评分。获准网络访问后的 `r2` 是本版本的有效结果。
+
+| 指标 | evidence-v7 | evidence-v8 | 变化 |
+| --- | ---: | ---: | ---: |
+| complete / incomplete / failed | 0 / 20 / 0 | 20 / 0 / 0 | 完成度 0% → 100% |
+| 总 LLM 调用 | 1,000 | 769 | -231（-23.1%） |
+| 平均 LLM 调用 | 50.00 | 38.45 | -11.55 |
+| read 调用 | 435 | 167 | -268（-61.6%） |
+| partial success | 271 | 189 | -82（-30.3%） |
+| validation errors | 560 | 397 | -163（-29.1%） |
+| 最大单次 prompt | 24,544 | 18,718 | -5,826 |
+| matched / wrong / missing / extra | 279 / 60 / 212 / 23 | 292 / 67 / 192 / 24 | +13 / +7 / -20 / +1 |
+| 召回率 | 0.5064 | 0.5299 | +0.0235 |
+| 准确率 | 0.8230 | 0.8134 | -0.0096 |
+
+结果：
+
+- FLOW-001 与 CLOSE-001 达标：20 份全部提交，平均调用低于 40，且没有报告耗尽后
+  incomplete。
+- CTX-001 达标：read 调用下降 61.6%，最大 prompt 降至 18,718 tokens，远低于
+  128k 上下文窗口。
+- REPAIR-001 有改善但未达预设 60%：validation errors 只下降 29.1%，
+  partial success 下降 30.3%。
+- 完成度改善转化成 20 个更少的 missing 和 13 个更多的 matched，但同时增加 7 个
+  wrong，导致准确率轻微下降。
+- 下一轮不能再主要增加流程约束。应进入 EVID-001，优先处理表格行、目标年份、
+  单位与 shares_outstanding 的 source evidence 解析；当前 shares_outstanding
+  recall 为 0，gross_profit、operating_income 和 sga_expense 的 precision 也偏低。
 
 ## 后续优化路线
 
 | ID | 优先级 | 假设 | 预期验证信号 | 状态 |
 | --- | --- | --- | --- | --- |
-| FLOW-001 | P0 | 用代码维护显式阶段与下一动作，可阻止模型重复读取并保证收口 | incomplete 降到 0；平均调用低于 40 | smoke 达标，待 20 份 |
-| REPAIR-001 | P0 | 将工具校验错误压缩成逐行、可执行的修复队列，可减少无效重试 | validation errors 和 partial success 至少下降 60% | 部分实施，未达目标 |
-| CTX-001 | P0 | checkpoint 应保留覆盖矩阵、已查来源、失败原因与下一动作，而非只保留 KPI 结果 | 重复 read/search 至少下降 50% | smoke 达标，待 20 份 |
+| FLOW-001 | P0 | 用代码维护显式阶段与下一动作，可阻止模型重复读取并保证收口 | incomplete 降到 0；平均调用低于 40 | 达标，保留 |
+| REPAIR-001 | P0 | 将工具校验错误压缩成逐行、可执行的修复队列，可减少无效重试 | validation errors 和 partial success 至少下降 60% | 改善 29% / 30%，未达目标 |
+| CTX-001 | P0 | checkpoint 应保留覆盖矩阵、已查来源、失败原因与下一动作，而非只保留 KPI 结果 | 重复 read/search 至少下降 50% | read 下降 61.6%，达标 |
 | EVID-001 | P1 | 给表格单元格稳定 source ID，并让工具从 source ID 解析行/年/单位，可减少字段错位 | wrong 下降且准确率不低于当前基线 | 待实施 |
 | NOTE-001 | P1 | 按来源组处理债务、现金、股数和费用 note，可提升长尾 KPI 召回 | 对应 KPI 的 missing 显著下降 | 待实施 |
-| CLOSE-001 | P1 | 在剩余预算阈值处由代码限制动作并强制覆盖收口，可避免耗尽 50 次仍未完成 | 每份报告都有最终 submission | smoke 达标，待 20 份 |
+| CLOSE-001 | P1 | 在剩余预算阈值处由代码限制动作并强制覆盖收口，可避免耗尽 50 次仍未完成 | 每份报告都有最终 submission | 20/20 提交，达标 |
 
 原则仍然是单个 ADK agent：路线中的状态机、checkpoint 和动作约束都作为 agent
 运行时机制实现，不拆分子 agent，也不绕过 agent 直接调用 LLM。
@@ -171,11 +221,11 @@ prompt 版本：`evidence-v8`
 uv run finground ledger-multi \
   --parquet data/ledger/raw/multi_kpi/eval/data.parquet \
   --reports-file tests/fixtures/ledger/eval-2017-trace-20.txt \
-  --output-dir outputs/ledger/<version>-trace20 \
+  --output-dir outputs/ledger/<version>-trace20-c20-<commit> \
   --concurrency 20
 
 uv run finground ledger-score-multi \
-  --output-dir outputs/ledger/<version>-trace20 \
+  --output-dir outputs/ledger/<version>-trace20-c20-<commit> \
   --parquet data/ledger/raw/multi_kpi/eval/data.parquet
 ```
 
