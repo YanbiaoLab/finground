@@ -96,6 +96,14 @@ def test_prediction_commands_only_expose_required_parquet_input() -> None:
         assert "--concurrency" in option_actions
 
 
+def test_multi_kpi_defaults_to_twenty_concurrent_runs() -> None:
+    args = build_parser().parse_args(
+        ["ledger-multi", "--parquet", "multi-kpi.parquet"]
+    )
+
+    assert args.concurrency == 20
+
+
 def test_score_commands_only_require_output_and_original_parquet() -> None:
     subparsers = next(action for action in build_parser()._actions if action.dest == "command")
     for command in ("ledger-score-needle", "ledger-score-multi"):

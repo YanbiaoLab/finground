@@ -102,8 +102,8 @@ def build_parser() -> argparse.ArgumentParser:
     multi_parser.add_argument(
         "--concurrency",
         type=_positive_int,
-        default=4,
-        help="maximum number of concurrent Multi-KPI agent runs (default: 4)",
+        default=20,
+        help="maximum number of concurrent Multi-KPI agent runs (default: 20)",
     )
 
     score_needle_parser = commands.add_parser(
