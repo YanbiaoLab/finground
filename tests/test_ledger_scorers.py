@@ -6,8 +6,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from finground.benchmark.cli import build_parser
-from finground.benchmark.multi_kpi_scorer import score_multi_kpi
-from finground.benchmark.needle_scorer import score_needle
+from finground.benchmark.multi_kpi_scorer import score_kpi, score_multi_kpi
 from finground.documents import Report
 from finground.kpis import KPI_KEYS
 from finground.tools import (
@@ -18,25 +17,6 @@ from finground.tools import (
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "ledger"
-
-
-def _write_needle_ground_truth(path: Path) -> None:
-    pq.write_table(
-        pa.table(
-            {
-                "query_id": ["ACME_revenue_2023"],
-                "ticker": ["ACME"],
-                "kpi": ["revenue"],
-                "year": [2023],
-                "value": [1_234_000_000.0],
-                "source": ["fixture"],
-                "company_name": ["ACME Corp"],
-                "exchange": ["NYSE"],
-                "industry": ["Fixture"],
-            }
-        ),
-        path,
-    )
 
 
 def _write_multi_ground_truth(path: Path) -> None:
@@ -52,6 +32,24 @@ def _write_multi_ground_truth(path: Path) -> None:
     pq.write_table(pa.table(values), path)
 
 
+def _write_long_ground_truth(path: Path) -> None:
+    pq.write_table(
+        pa.table(
+            {
+                "ticker": ["ACME"],
+                "exchange": ["NYSE"],
+                "company_name": ["ACME Corp"],
+                "industry": ["Fixture"],
+                "year": [2023],
+                "kpi": ["revenue"],
+                "value": [1_234_000_000.0],
+                "mmd_text": ["unused by scorer"],
+            }
+        ),
+        path,
+    )
+
+
 def _write_multi_scope(output_dir: Path) -> None:
     (output_dir / "run_meta.json").write_text(
         json.dumps({"report_ids": ["NYSE_ACME_2023"]}),
@@ -62,9 +60,9 @@ def _write_multi_scope(output_dir: Path) -> None:
 def test_cli_exposes_only_supported_ledger_commands() -> None:
     subparsers = next(action for action in build_parser()._actions if action.dest == "command")
     assert set(subparsers.choices) == {
-        "ledger-needle",
+        "ledger-kpi",
         "ledger-multi",
-        "ledger-score-needle",
+        "ledger-score-kpi",
         "ledger-score-multi",
     }
 
@@ -82,7 +80,7 @@ def test_every_cli_option_has_help_text() -> None:
 
 def test_prediction_commands_only_expose_required_parquet_input() -> None:
     subparsers = next(action for action in build_parser()._actions if action.dest == "command")
-    for command in ("ledger-needle", "ledger-multi"):
+    for command in ("ledger-kpi", "ledger-multi"):
         command_parser = subparsers.choices[command]
         option_actions = {
             option: action for action in command_parser._actions for option in action.option_strings
@@ -97,16 +95,23 @@ def test_prediction_commands_only_expose_required_parquet_input() -> None:
 
 
 def test_multi_kpi_defaults_to_twenty_concurrent_runs() -> None:
-    args = build_parser().parse_args(
-        ["ledger-multi", "--parquet", "multi-kpi.parquet"]
-    )
+    args = build_parser().parse_args(["ledger-multi", "--parquet", "multi-kpi.parquet"])
 
     assert args.concurrency == 20
 
 
+def test_single_kpi_command_requires_a_canonical_kpi() -> None:
+    args = build_parser().parse_args(
+        ["ledger-kpi", "--kpi", "revenue", "--parquet", "multi-kpi.parquet"]
+    )
+
+    assert args.kpi == "revenue"
+    assert args.output_dir == Path(__file__).resolve().parents[1] / "outputs" / "ledger" / "kpi"
+
+
 def test_score_commands_only_require_output_and_original_parquet() -> None:
     subparsers = next(action for action in build_parser()._actions if action.dest == "command")
-    for command in ("ledger-score-needle", "ledger-score-multi"):
+    for command in ("ledger-score-kpi", "ledger-score-multi"):
         option_actions = {
             option: action
             for action in subparsers.choices[command]._actions
@@ -117,26 +122,6 @@ def test_score_commands_only_require_output_and_original_parquet() -> None:
         assert "--ledger-root" not in option_actions
         assert "--kpis-long" not in option_actions
         assert "--test-set-reports" not in option_actions
-
-
-def test_internal_needle_scorer_reads_ground_truth_from_parquet(tmp_path: Path) -> None:
-    output_dir = tmp_path / "needle-output"
-    output_dir.mkdir()
-    (output_dir / "responses.jsonl").write_text(
-        (FIXTURE / "responses.jsonl").read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
-    parquet_path = tmp_path / "needle.parquet"
-    _write_needle_ground_truth(parquet_path)
-
-    result = score_needle(
-        output_dir=output_dir,
-        parquet_path=parquet_path,
-    )
-
-    assert result["accuracy"] == 1.0
-    assert (output_dir / "summary.md").is_file()
-    assert (output_dir / "scored.csv").is_file()
 
 
 def test_internal_multi_scorer_reads_ground_truth_from_parquet(tmp_path: Path) -> None:
@@ -163,18 +148,73 @@ def test_internal_multi_scorer_reads_ground_truth_from_parquet(tmp_path: Path) -
     assert result["recall"] == 1.0
     assert result["precision"] == 1.0
     assert result["n_gt"] == 1
+    assert result["quality_gate"]["passed"] is False
+    assert sum(gate["passed"] for gate in result["per_kpi_quality_gates"]) == 1
     assert result["reports_scored"] == 1
     summary = (predictions / "summary.md").read_text()
     assert "1.0000" in summary
+
+
+def test_single_kpi_scorer_projects_only_requested_ledger_column(tmp_path: Path) -> None:
+    predictions = tmp_path / "predictions"
+    (predictions / "raw").mkdir(parents=True)
+    source = FIXTURE / "multi" / "raw" / "NYSE_ACME_2023.json"
+    (predictions / "raw" / source.name).write_text(source.read_text())
+    (predictions / "run_meta.json").write_text(
+        json.dumps(
+            {
+                "report_ids": ["NYSE_ACME_2023"],
+                "requested_kpis": ["revenue"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    parquet_path = tmp_path / "multi.parquet"
+    _write_multi_ground_truth(parquet_path)
+
+    result = score_kpi(
+        kpi="revenue",
+        output_dir=predictions,
+        parquet_path=parquet_path,
+    )
+
+    assert result["n_gt"] == 1
+    assert result["matched"] == 1
+    assert result["missing"] == 0
+    assert result["quality_gate"]["passed"] is True
+
+
+def test_single_kpi_scorer_accepts_official_ledger_long_parquet(tmp_path: Path) -> None:
+    predictions = tmp_path / "predictions"
+    (predictions / "raw").mkdir(parents=True)
+    source = FIXTURE / "multi" / "raw" / "NYSE_ACME_2023.json"
+    (predictions / "raw" / source.name).write_text(source.read_text())
+    (predictions / "run_meta.json").write_text(
+        json.dumps(
+            {
+                "report_ids": ["NYSE_ACME_2023"],
+                "requested_kpis": ["revenue"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    parquet_path = tmp_path / "ledger-long.parquet"
+    _write_long_ground_truth(parquet_path)
+
+    result = score_kpi(
+        kpi="revenue",
+        output_dir=predictions,
+        parquet_path=parquet_path,
+    )
+
+    assert result["quality_gate"]["passed"] is True
 
 
 def test_internal_multi_scorer_scores_incomplete_partial_predictions(tmp_path: Path) -> None:
     predictions = tmp_path / "predictions"
     raw_dir = predictions / "raw"
     raw_dir.mkdir(parents=True)
-    source = json.loads(
-        (FIXTURE / "multi" / "raw" / "NYSE_ACME_2023.json").read_text()
-    )
+    source = json.loads((FIXTURE / "multi" / "raw" / "NYSE_ACME_2023.json").read_text())
     source["status"] = "incomplete"
     (raw_dir / "NYSE_ACME_2023.json").write_text(json.dumps(source))
     _write_multi_scope(predictions)
@@ -184,6 +224,7 @@ def test_internal_multi_scorer_scores_incomplete_partial_predictions(tmp_path: P
     result = score_multi_kpi(output_dir=predictions, parquet_path=parquet_path)
 
     assert result["recall"] == 1.0
+    assert result["quality_gate"]["passed"] is False
     assert "incomplete=1" in (predictions / "summary.md").read_text()
 
 

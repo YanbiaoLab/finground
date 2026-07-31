@@ -7,7 +7,7 @@ KPI_DESCRIPTIONS: dict[str, str] = {
     "cost_of_revenue": "Cost of goods and services sold. Flow. Reporting currency.",
     "gross_profit": "Revenue minus cost of revenue. Flow. Reporting currency.",
     "rd_expense": "Research and development expense (R&D only — exclude SG&A). Flow. Reporting currency.",
-    "sga_expense": "Selling, general and administrative expense. Flow. Reporting currency.",
+    "sga_expense": "Selling, general and administrative expense; when no combined SG&A row exists, LEDGER accepts general and administrative expense as its tag-waterfall fallback. Flow. Reporting currency.",
     "operating_income": "Operating income / operating profit (EBIT-level). Flow. Reporting currency. Sign: usually positive but can be negative.",
     "interest_expense": "Interest expense on debt. Flow. Reporting currency. Sign: positive cost.",
     "income_tax_expense": "Income tax expense / benefit. Flow. Reporting currency. Sign: positive expense, negative benefit.",
@@ -32,7 +32,7 @@ KPI_DESCRIPTIONS: dict[str, str] = {
     "investing_cash_flow": "Net cash provided by / used in investing activities. Flow. Reporting currency; keep the reported sign.",
     "financing_cash_flow": "Net cash provided by / used in financing activities. Flow. Reporting currency; keep the reported sign.",
     "capex": "Capital expenditure: payments to acquire property, plant and equipment. Flow. Reporting currency. Sign: positive cash outflow.",
-    "depreciation_amortization": "Depreciation and amortization: the addback line on the cash-flow statement. Flow. Reporting currency. Sign: positive.",
+    "depreciation_amortization": "Depreciation, depletion and amortization addback; LEDGER falls back to depreciation when no combined row exists. Flow. Reporting currency. Sign: positive.",
     "dividends_paid": "Cash dividends paid to common shareholders during the period. Flow. Reporting currency. Sign: positive cash outflow.",
 }
 
@@ -56,7 +56,12 @@ KPI_ALIASES: dict[str, tuple[str, ...]] = {
     ),
     "gross_profit": ("gross profit", "gross margin"),
     "rd_expense": ("research and development", "r&d"),
-    "sga_expense": ("selling general and administrative", "sg&a"),
+    "sga_expense": (
+        "selling general and administrative",
+        "general and administrative",
+        "general & administrative",
+        "sg&a",
+    ),
     "operating_income": ("operating income", "operating profit", "income from operations"),
     "interest_expense": ("interest expense", "finance costs", "finance expense"),
     "income_tax_expense": (
@@ -64,9 +69,26 @@ KPI_ALIASES: dict[str, tuple[str, ...]] = {
         "income tax benefit",
         "provision for income taxes",
     ),
-    "net_income": ("net income attributable", "net income", "profit attributable"),
-    "eps_basic": ("basic earnings per share", "basic eps"),
-    "eps_diluted": ("diluted earnings per share", "diluted eps"),
+    "net_income": (
+        "net income attributable",
+        "net income",
+        "net loss",
+        "net earnings",
+        "profit attributable",
+        "profit for the year",
+    ),
+    "eps_basic": (
+        "basic earnings per share",
+        "basic eps",
+        "loss per share",
+        "basic and diluted",
+    ),
+    "eps_diluted": (
+        "diluted earnings per share",
+        "diluted eps",
+        "loss per share",
+        "basic and diluted",
+    ),
     "total_assets": ("total assets",),
     "total_liabilities": ("total liabilities",),
     "stockholders_equity": (
@@ -81,20 +103,47 @@ KPI_ALIASES: dict[str, tuple[str, ...]] = {
     ),
     "cash_and_equivalents": ("cash and cash equivalents",),
     "cash_incl_restricted": ("cash cash equivalents and restricted cash",),
-    "long_term_debt_total": ("total long term debt", "long term debt including current"),
+    "long_term_debt_total": (
+        "total long term debt",
+        "long term debt including current",
+        "total debt",
+        "debt obligations",
+        "notes payable and obligations under capital leases",
+    ),
     "long_term_debt_noncurrent": ("long term debt", "noncurrent debt"),
-    "long_term_debt_current": ("current portion of long term debt",),
-    "short_term_borrowings": ("short term borrowings", "short term debt"),
+    "long_term_debt_current": (
+        "current portion of long term debt",
+        "current maturities of long term debt",
+        "current maturities of notes payable",
+        "current debt",
+    ),
+    "short_term_borrowings": (
+        "short term borrowings",
+        "short term debt",
+        "current debt",
+        "bank loans",
+        "bank borrowings",
+        "current maturities of notes payable",
+        "current maturities of long term debt",
+        "current portion of long term debt",
+        "repurchase agreements",
+        "line of credit",
+        "commercial paper",
+    ),
     "inventory": ("inventory", "inventories"),
     "accounts_receivable": (
         "accounts receivable",
         "trade receivables",
         "trade and other receivables",
+        "interest receivable",
+        "accounts and notes receivable",
     ),
     "accounts_payable": (
         "accounts payable",
         "trade payables",
         "trade and other payables",
+        "accounts payable and other liabilities",
+        "accounts payable and accrued liabilities",
     ),
     "shares_outstanding": (
         "shares outstanding",
@@ -130,7 +179,10 @@ KPI_ALIASES: dict[str, tuple[str, ...]] = {
     "depreciation_amortization": (
         "depreciation and amortization",
         "depreciation and amortisation",
+        "depreciation depletion and amortization",
+        "depreciation, depletion and amortization",
         "depreciation amortization",
+        "depreciation",
     ),
     "dividends_paid": (
         "dividends paid",
@@ -143,16 +195,10 @@ KPI_ALIASES: dict[str, tuple[str, ...]] = {
 PER_SHARE_KPIS = {"eps_basic", "eps_diluted"}
 SHARE_COUNT_KPIS = {"shares_outstanding"}
 POSITIVE_OUTFLOW_KPIS = {"capex", "dividends_paid"}
-POSITIVE_MAGNITUDE_KPIS = POSITIVE_OUTFLOW_KPIS | {"interest_expense"}
-
-
-def parse_query_id(query_id: str) -> tuple[str, str, int]:
-    """Parse `{ticker}_{kpi}_{year}` without assuming the ticker has no underscore."""
-    head, separator, year_text = query_id.rpartition("_")
-    if not separator or not year_text.isdigit():
-        raise ValueError(f"invalid LEDGER query id: {query_id}")
-    for kpi in sorted(KPI_DESCRIPTIONS, key=len, reverse=True):
-        suffix = f"_{kpi}"
-        if head.endswith(suffix):
-            return head[: -len(suffix)], kpi, int(year_text)
-    raise ValueError(f"query id contains an unknown KPI: {query_id}")
+POSITIVE_MAGNITUDE_KPIS = POSITIVE_OUTFLOW_KPIS | {
+    "interest_expense",
+    "long_term_debt_total",
+    "long_term_debt_noncurrent",
+    "long_term_debt_current",
+    "short_term_borrowings",
+}

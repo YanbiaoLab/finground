@@ -21,7 +21,7 @@ def test_llm_call_counter_counts_each_model_request_attempt() -> None:
     assert counter.count == 2
 
 
-def test_llm_call_counter_does_not_count_calls_rejected_by_adk_limit() -> None:
+def test_llm_call_counter_keeps_actual_count_beyond_configured_limit() -> None:
     counter = LlmCallCounterPlugin(max_calls=2)
 
     async def count() -> None:
@@ -30,7 +30,7 @@ def test_llm_call_counter_does_not_count_calls_rejected_by_adk_limit() -> None:
 
     asyncio.run(count())
 
-    assert counter.count == 2
+    assert counter.count == 3
 
 
 def test_llm_call_counter_forces_final_tool_at_submission_deadline() -> None:
@@ -133,3 +133,19 @@ def test_multi_kpi_run_metrics_tracks_tool_validation_and_tokens() -> None:
         "latest_pending_count": 30,
         "tool_exception_count": 0,
     }
+
+
+def test_multi_kpi_run_metrics_accepts_agent_tool_text_results() -> None:
+    metrics = MultiKpiRunMetricsPlugin()
+
+    asyncio.run(
+        metrics.after_tool_callback(
+            tool=SimpleNamespace(name="extract_revenue"),
+            tool_args={"request": "find revenue"},
+            tool_context=None,
+            result='{"status":"success","coverage_count":1}',
+        )
+    )
+
+    assert metrics.snapshot()["tool_calls"] == {"extract_revenue": 1}
+    assert metrics.snapshot()["tool_statuses"] == {"extract_revenue:completed": 1}

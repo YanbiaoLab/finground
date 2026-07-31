@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
+from copy import deepcopy
 from html import unescape
 from typing import Any
 
@@ -18,7 +19,6 @@ from finground.models import (
     MultiKpiNote,
     MultiKpiRecordView,
     MultiKpiWorkRecord,
-    NeedleAnswer,
     ReportExtraction,
     UnitScale,
 )
@@ -26,26 +26,28 @@ from finground.normalize import (
     NUMBER_TOKEN_RE,
     SCALE_MULTIPLIERS,
     detect_scale,
-    normalize_needle_answer,
     normalize_value,
     parse_financial_number,
-    validate_needle_evidence,
 )
+from finground.sec_facts import SEC_FACTS_STATE_KEY
 
-from .report import report_from_state
+from .report import (
+    MULTI_KPI_SOURCE_CELLS_STATE_KEY,
+    report_from_state,
+)
 from .structured import JsonSchemaFunctionTool
 
 ISO_CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 
-NEEDLE_KPI_STATE_KEY = "needle_kpi"
-NEEDLE_RESULT_STATE_KEY = "needle_result"
 MULTI_KPI_WORK_RECORD_STATE_KEY = "multi_kpi_work_record"
 MULTI_KPI_RESULT_STATE_KEY = "multi_kpi_result"
 MULTI_KPI_AUDIT_STATE_KEY = "multi_kpi_audit"
-MULTI_KPI_ALLOW_PARTIAL_STATE_KEY = "temp:multi_kpi_allow_partial_submission"
+MULTI_KPI_ALLOW_PARTIAL_STATE_KEY = "multi_kpi_allow_partial_submission"
+MULTI_KPI_REQUESTED_STATE_KEY = "multi_kpi_requested"
 
 _EXPLICIT_ZERO_MARKERS = {"-", "−", "–", "—", "nil"}
-MAX_MULTI_KPI_RECORD_ROWS = 8
+MAX_MULTI_KPI_RECORD_ROWS = 16
+_INVALID_SOURCE_CANDIDATE = object()
 
 _HTML_TABLE_RE = re.compile(r"<table\b[^>]*>.*?</table>", re.IGNORECASE | re.DOTALL)
 _HTML_ROW_RE = re.compile(r"<tr\b[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
@@ -127,6 +129,232 @@ def _validation_error_response(
 def _normalized_source_text(text: str) -> str:
     visible_text = re.sub(r"<[^>]+>", " ", unescape(text))
     return " ".join(visible_text.casefold().split())
+
+
+def _semantic_row_error(kpi: str, line_label: str, status: str) -> str | None:
+    """Reject only row labels that cannot represent the requested canonical KPI."""
+    label = _normalized_source_text(line_label)
+
+    required_patterns: dict[str, tuple[str, ...]] = {
+        "revenue": (
+            r"\brevenues?\b",
+            r"\bnet sales\b",
+            r"\btotal sales\b",
+            r"^sales$",
+            r"\b(?:net product|oil and gas) sales\b",
+        ),
+        "cost_of_revenue": (
+            r"\bcost of (?:revenues?|sales|goods|services|operations)\b",
+            r"\bcost of goods (?:and services )?sold\b",
+            r"\bcost of products sold\b",
+            r"\bcosts? of operations\b",
+        ),
+        "gross_profit": (
+            r"\bgross profit\b",
+            r"\bgross margin\b",
+            r"\bproduction margin\b",
+        ),
+        "rd_expense": (
+            r"\bresearch and development\b",
+            r"\br\s*&\s*d\b",
+            r"\bdesign and development\b",
+            r"\bresearch (?:and|&) engineering\b",
+        ),
+        "sga_expense": (
+            r"\bselling,?\s+general,?\s+(?:and\s+)?administrative\b",
+            r"\bgeneral\s+(?:and|&)\s+administrative\b",
+            r"\bmarketing and administrative\b",
+        ),
+        "operating_income": (
+            r"\boperating (?:income|profit|loss)\b",
+            r"\b(?:income|loss) from operations\b",
+            r"\bearnings from operations\b",
+        ),
+        "interest_expense": (r"\binterest expense\b", r"\bfinance costs?\b"),
+        "income_tax_expense": (
+            r"\bincome tax (?:expense|benefit|provision|recovery)\b",
+            r"\bprovision for income taxes\b",
+            r"\bprovision .* for income taxes\b",
+            r"\bbenefit for income taxes\b",
+            r"\btax expense \(?benefit\)?\b",
+            r"\bincome taxes\b",
+        ),
+        "net_income": (
+            r"\bnet (?:income|loss|earnings)\b",
+            r"\bprofit (?:for the year|attributable)\b",
+            r"\bincome \(?loss\)? from continuing operations attributable\b",
+        ),
+        "total_assets": (r"\btotal assets\b",),
+        "total_liabilities": (r"\btotal liabilities\b",),
+        "inventory": (r"\binventor(?:y|ies)\b",),
+        "accounts_receivable": (
+            r"\baccounts receivable\b",
+            r"\btrade receivables?\b",
+            r"\breceivables?\b",
+            r"\bsales receivable\b",
+        ),
+        "accounts_payable": (r"\baccounts payable\b", r"\btrade payables?\b"),
+        "operating_cash_flow": (
+            r"\bnet cash .*\boperating activities\b",
+            r"\bcash .*\boperating activities\b",
+            r"\bnet operating cash\b",
+            r"\bunlabeled numeric total.*\boperating activities\b",
+        ),
+        "investing_cash_flow": (
+            r"\bnet cash .*\binvesting activities\b",
+            r"\bcash .*\binvesting activities\b",
+            r"\bnet investing cash\b",
+            r"\bunlabeled numeric total.*\binvesting activities\b",
+        ),
+        "financing_cash_flow": (
+            r"\bnet cash .*\bfinancing activities\b",
+            r"\bcash .*\bfinancing activities\b",
+            r"\bnet financing cash\b",
+            r"\bunlabeled numeric total.*\bfinancing activities\b",
+        ),
+        "capex": (
+            r"\b(?:purchase|purchases|payments?|acquisition|acquisitions) .*(?:property|plant|equipment)\b",
+            r"\bcapital expenditures?\b",
+            r"\b(?:additions|expenditures) .*(?:property|properties|plant|equipment|fixed assets|long-lived assets)\b",
+        ),
+        "depreciation_amortization": (
+            r"\bdepreciation and amorti[sz]ation\b",
+            r"\bdepreciation & amorti[sz]ation\b",
+            r"\bdepreciation,? depletion and amorti[sz]ation\b",
+            r"\bdepletion,? depreciation,? and amorti[sz]ation\b",
+            r"\bdepreciation\b",
+        ),
+        "dividends_paid": (
+            r"\bdividends? paid\b",
+            r"\bpayments? of dividends?\b",
+            r"\bcash dividends?\b",
+            r"\bdividends? to (?:shareholders|stockholders)\b",
+            r"\bdividend payments?\b",
+            r"\bcash distributions?\b",
+            r"\bdistributions? paid\b",
+        ),
+    }
+    patterns = required_patterns.get(kpi)
+    if patterns is not None and not any(re.search(pattern, label) for pattern in patterns):
+        return f"{kpi} requires a row label matching its canonical financial concept"
+
+    if kpi == "revenue" and re.search(r"\b(?:proceeds|gain|cost|unearned|deferred)\b", label):
+        return "revenue requires the operating top line, not proceeds, gains, costs, or deferred revenue"
+    if kpi == "gross_profit" and re.search(r"(?:%|percent|percentage)", label):
+        return "gross_profit requires a monetary amount, not a margin percentage"
+    if kpi == "interest_expense" and ("interest income" in label or "interest rate" in label):
+        return "interest_expense excludes interest income and interest rates"
+    if kpi == "income_tax_expense" and "income taxes paid" in label:
+        return "income_tax_expense is accrual tax expense/benefit, not cash taxes paid"
+    if kpi == "capex" and re.search(r"\badditions?\b", label):
+        return (
+            "capex requires a cash purchase/payment row; PP&E or property additions "
+            "are accrual asset-note movements"
+        )
+    if kpi == "dividends_paid" and "per share" in label:
+        return "dividends_paid requires the cash outflow, not dividends per share"
+
+    cash_flow_activities = {
+        "operating_cash_flow": "operating",
+        "investing_cash_flow": "investing",
+        "financing_cash_flow": "financing",
+    }
+    expected_activity = cash_flow_activities.get(kpi)
+    if expected_activity is not None:
+        conflicting = [
+            activity
+            for activity in ("operating", "investing", "financing")
+            if activity != expected_activity and f"{activity} activities" in label
+        ]
+        if conflicting:
+            return (
+                f"{kpi} requires the net {expected_activity}-activities row; "
+                f"the cited label is for {conflicting[0]} activities"
+            )
+
+    if kpi == "total_liabilities":
+        if "liabilit" not in label:
+            return "total_liabilities requires an explicitly labelled liabilities total"
+        if (
+            "liabilities and shareholders' equity" in label
+            or "liabilities and stockholders' equity" in label
+            or "liabilities and equity" in label
+        ):
+            return "total_liabilities excludes equity; cite the standalone total liabilities row"
+        if "current liabilities" in label:
+            return (
+                "total_liabilities requires all liabilities, not the current-liabilities subtotal"
+            )
+
+    if kpi == "operating_income" and re.search(
+        r"\b(?:income|earnings|profit)\s+before\s+(?:income\s+)?tax",
+        label,
+    ):
+        return "operating_income requires an operating/EBIT row, not a pre-tax income row"
+
+    if (
+        kpi == "income_tax_expense"
+        and ("current income tax" in label or "deferred income tax" in label)
+        and "total" not in label
+    ):
+        return "income_tax_expense requires the total tax expense/benefit, not one tax component"
+
+    if kpi == "shares_outstanding":
+        if "weighted average" in label or "weighted-average" in label:
+            return (
+                "shares_outstanding requires a period-end share count, not weighted-average shares"
+            )
+        if "authorized" in label and "outstanding" not in label:
+            return "authorized shares are not shares outstanding"
+
+    if kpi in {"accounts_receivable", "accounts_payable"}:
+        is_party_component = "related parties" in label or "unrelated parties" in label
+        if is_party_component and "total" not in label:
+            return f"{kpi} requires the total current balance, not one counterparty component"
+    if kpi == "accounts_payable" and "accounts payable" in label and "accrued" in label:
+        return "accounts_payable excludes accrued-expense balances combined into the cited row"
+
+    if kpi in {"stockholders_equity", "stockholders_equity_incl_nci"} and (
+        "percent" in label or "per share" in label or "return on" in label
+    ):
+        return f"{kpi} requires the period-end equity balance, not a ratio or per-share row"
+
+    if kpi == "short_term_borrowings" and "interest rate" in label:
+        return "short_term_borrowings requires the period-end principal balance, not its rate"
+    if (
+        kpi == "short_term_borrowings"
+        and status == "explicit_zero"
+        and re.search(r"\b(?:current portion|current maturities)\b", label)
+    ):
+        return (
+            "a zero combined/current-maturities row does not establish a standalone "
+            "short-term-borrowings balance"
+        )
+
+    if kpi == "long_term_debt_total" and (
+        "future principal payment" in label or "future principle payment" in label
+    ):
+        return "long_term_debt_total requires the period-end balance, not future payment maturities"
+    if (
+        kpi == "long_term_debt_current"
+        and "current portion of non-current liabilities" in label
+        and not re.search(r"\b(?:debt|borrowings?|notes?|leases?)\b", label)
+    ):
+        return (
+            "long_term_debt_current requires a debt, borrowing, note, or lease row; "
+            "a generic current portion of all non-current liabilities is too broad"
+        )
+
+    return None
+
+
+def _detected_unit_scale(kpi: str, unit_text: str | None) -> UnitScale:
+    if kpi == "shares_outstanding" and re.search(
+        r"\bexcept\s+(?:share|shares|share\s+and\s+per\s+share)\b",
+        (unit_text or "").casefold(),
+    ):
+        return "units"
+    return detect_scale(unit_text or "", kpi)
 
 
 def _source_rows(page_text: str) -> list[str]:
@@ -310,7 +538,7 @@ def _resolve_multi_kpi_scale(
 ) -> tuple[UnitScale | None, str | None]:
     if candidate.unit_text is None and candidate.unit_scale not in {None, "unknown"}:
         return candidate.unit_scale, "agent"
-    detected = detect_scale(candidate.unit_text or "", candidate.kpi)
+    detected = _detected_unit_scale(candidate.kpi, candidate.unit_text)
     if detected != "unknown":
         return detected, "unit_text" if candidate.unit_text else "kpi"
     if candidate.unit_scale not in {None, "unknown"}:
@@ -322,10 +550,15 @@ def _normalize_multi_kpi_candidates(
     raw_candidates: list[object],
     pages: list[Any],
     report_year: int,
+    *,
+    source_backed_indexes: set[int] | None = None,
 ) -> tuple[list[MultiKpiEvidence], list[dict[str, str]], list[dict[str, Any]]]:
+    source_backed_indexes = source_backed_indexes or set()
     errors: list[dict[str, str]] = []
     candidates: list[tuple[int, MultiKpiEvidenceCandidate]] = []
     for index, raw_candidate in enumerate(raw_candidates):
+        if raw_candidate is _INVALID_SOURCE_CANDIDATE:
+            continue
         try:
             candidates.append((index, MultiKpiEvidenceCandidate.model_validate(raw_candidate)))
         except ValidationError as error:
@@ -370,6 +603,15 @@ def _normalize_multi_kpi_candidates(
         assert candidate.page is not None
         assert candidate.line_label is not None
         assert candidate.value_verbatim is not None
+        semantic_error = _semantic_row_error(candidate.kpi, candidate.line_label, candidate.status)
+        if semantic_error is not None:
+            errors.append(
+                {
+                    "field": f"kpis.{index}.line_label",
+                    "message": f"semantic mismatch: {semantic_error}",
+                }
+            )
+            continue
         page_text = page_by_number.get(candidate.page)
         if page_text is None:
             errors.append(
@@ -380,7 +622,11 @@ def _normalize_multi_kpi_candidates(
             )
             continue
         evidence_error_count = len(errors)
-        if candidate.year_label and candidate.year_label.casefold() not in page_text.casefold():
+        if (
+            index not in source_backed_indexes
+            and candidate.year_label
+            and candidate.year_label.casefold() not in page_text.casefold()
+        ):
             errors.append(
                 {
                     "field": f"kpis.{index}.year_label",
@@ -418,7 +664,11 @@ def _normalize_multi_kpi_candidates(
                     "message": "scaled values require exact visible unit_text and unit_page",
                 }
             )
-        elif candidate.unit_text is None and candidate.unit_scale == "units":
+        elif (
+            index not in source_backed_indexes
+            and candidate.unit_text is None
+            and candidate.unit_scale == "units"
+        ):
             visible_header_scale = detect_scale(page_text[:2_000], candidate.kpi)
             if visible_header_scale in {"thousands", "millions", "billions"}:
                 errors.append(
@@ -467,7 +717,11 @@ def _normalize_multi_kpi_candidates(
                     }
                 )
                 continue
-            aligned = _value_matches_year_column(page_text, candidate)
+            aligned = (
+                True
+                if index in source_backed_indexes
+                else _value_matches_year_column(page_text, candidate)
+            )
             if aligned is False:
                 errors.append(
                     {
@@ -499,7 +753,11 @@ def _normalize_multi_kpi_candidates(
                     }
                 )
                 continue
-            aligned = _value_matches_year_column(page_text, candidate)
+            aligned = (
+                True
+                if index in source_backed_indexes
+                else _value_matches_year_column(page_text, candidate)
+            )
             if aligned is False:
                 errors.append(
                     {
@@ -563,15 +821,204 @@ def _normalize_multi_kpi_candidates(
     return normalized, errors, corrections
 
 
+def _expand_source_backed_candidates(
+    raw_candidates: list[object],
+    tool_context: ToolContext,
+) -> tuple[list[object], list[dict[str, str]], set[int]]:
+    source_cells = tool_context.state.get(MULTI_KPI_SOURCE_CELLS_STATE_KEY, {})
+    if not isinstance(source_cells, dict):
+        source_cells = {}
+    expanded: list[object] = []
+    errors: list[dict[str, str]] = []
+    source_backed_indexes: set[int] = set()
+    for index, raw_candidate in enumerate(raw_candidates):
+        if not isinstance(raw_candidate, dict) or "source_id" not in raw_candidate:
+            expanded.append(raw_candidate)
+            continue
+        source_id = raw_candidate.get("source_id")
+        source = source_cells.get(source_id) if isinstance(source_id, str) else None
+        if not isinstance(source, dict):
+            errors.append(
+                {
+                    "field": f"kpis.{index}.source_id",
+                    "message": "source_id is not available in the active page batch",
+                }
+            )
+            expanded.append(_INVALID_SOURCE_CANDIDATE)
+            continue
+        submitted_status = raw_candidate.get("status")
+        source_status = source.get("status")
+        if submitted_status != source_status:
+            errors.append(
+                {
+                    "field": f"kpis.{index}.status",
+                    "message": f"status must match source cell status {source_status!r}",
+                }
+            )
+            expanded.append(_INVALID_SOURCE_CANDIDATE)
+            continue
+        kpi = raw_candidate.get("kpi")
+        if not isinstance(kpi, str):
+            errors.append(
+                {
+                    "field": f"kpis.{index}.kpi",
+                    "message": "source-backed evidence requires a KPI key",
+                }
+            )
+            expanded.append(_INVALID_SOURCE_CANDIDATE)
+            continue
+        unit_text = source.get("unit_text")
+        if (
+            unit_text is None
+            and source_status != "explicit_zero"
+            and kpi not in {"eps_basic", "eps_diluted", "shares_outstanding"}
+        ):
+            errors.append(
+                {
+                    "field": f"kpis.{index}.source_id",
+                    "message": (
+                        "monetary source cells require traceable local or document-level "
+                        "unit text; use a different source or record ambiguous"
+                    ),
+                }
+            )
+            expanded.append(_INVALID_SOURCE_CANDIDATE)
+            continue
+        unit_scale = _detected_unit_scale(kpi, unit_text)
+        if unit_scale == "unknown":
+            unit_scale = "units"
+        source_backed_indexes.add(index)
+        printed_row_label = source.get("printed_row_label")
+        section_label = source.get("section_label")
+        line_label = (
+            printed_row_label
+            if isinstance(printed_row_label, str)
+            else f"Unlabeled numeric total in {section_label}"
+            if isinstance(section_label, str)
+            else source["row_label"]
+        )
+        expanded.append(
+            {
+                "kpi": kpi,
+                "fiscal_year": source["fiscal_year"],
+                "status": source_status,
+                "value_verbatim": source["value_verbatim"],
+                "unit_scale": unit_scale,
+                "unit_text": unit_text,
+                "unit_page": source.get("unit_page", source["page"])
+                if unit_text is not None
+                else None,
+                "page": source["page"],
+                "line_label": line_label,
+                "year_label": source["year_label"],
+                "scope": (
+                    source["row_label"]
+                    if printed_row_label is None and isinstance(source.get("row_label"), str)
+                    else None
+                ),
+            }
+        )
+    return expanded, errors, source_backed_indexes
+
+
 def _work_record_counts(work_record: MultiKpiWorkRecord) -> tuple[int, Counter[str]]:
     status_counts = Counter(item.status for item in work_record.kpis)
     extracted_count = status_counts["found"] + status_counts["explicit_zero"]
     return extracted_count, status_counts
 
 
-def _pending_multi_kpis(work_record: MultiKpiWorkRecord, report_year: int) -> list[str]:
+def _requested_multi_kpis(tool_context: ToolContext) -> tuple[str, ...]:
+    requested = tool_context.state.get(MULTI_KPI_REQUESTED_STATE_KEY)
+    if isinstance(requested, list):
+        selected = tuple(kpi for kpi in KPI_KEYS if kpi in requested)
+        if selected:
+            return selected
+    return KPI_KEYS
+
+
+def _pending_multi_kpis(
+    work_record: MultiKpiWorkRecord,
+    report_year: int,
+    requested_kpis: tuple[str, ...] = KPI_KEYS,
+    structured_kpis: set[str] | None = None,
+) -> list[str]:
     covered = {item.kpi for item in work_record.kpis if item.fiscal_year == report_year}
-    return [kpi for kpi in KPI_KEYS if kpi not in covered]
+    covered.update(structured_kpis or ())
+    return [kpi for kpi in requested_kpis if kpi not in covered]
+
+
+def _structured_kpis(tool_context: ToolContext) -> set[str]:
+    sec_facts = tool_context.state.get(SEC_FACTS_STATE_KEY, {})
+    values = sec_facts.get("values", {}) if isinstance(sec_facts, dict) else {}
+    return {
+        kpi
+        for kpi, fact in values.items()
+        if kpi in KPI_KEYS and isinstance(fact, dict) and isinstance(fact.get("value"), int | float)
+    }
+
+
+def _deterministic_derived_values(
+    work_record: MultiKpiWorkRecord,
+    report_year: int,
+) -> tuple[dict[str, float], list[str]]:
+    """Apply only LEDGER-aligned, auditable statement identities."""
+    rows = {item.kpi: item for item in work_record.kpis if item.fiscal_year == report_year}
+    values = {
+        kpi: float(item.value)
+        for kpi, item in rows.items()
+        if item.status in {"found", "explicit_zero"} and item.value is not None
+    }
+    derived: dict[str, float] = {}
+    formulas: list[str] = []
+
+    def absent(kpi: str) -> bool:
+        item = rows.get(kpi)
+        return item is not None and item.status == "absent"
+
+    def add(kpi: str, value: float, formula: str) -> None:
+        if absent(kpi) and math.isfinite(value):
+            derived[kpi] = value
+            formulas.append(f"{kpi} = {formula}")
+
+    if {"revenue", "cost_of_revenue"} <= values.keys():
+        add(
+            "gross_profit",
+            values["revenue"] - values["cost_of_revenue"],
+            "revenue - cost_of_revenue",
+        )
+    if {"revenue", "gross_profit"} <= values.keys():
+        add(
+            "cost_of_revenue",
+            values["revenue"] - values["gross_profit"],
+            "revenue - gross_profit",
+        )
+    if {"total_assets", "stockholders_equity_incl_nci"} <= values.keys():
+        add(
+            "total_liabilities",
+            values["total_assets"] - values["stockholders_equity_incl_nci"],
+            "total_assets - stockholders_equity_incl_nci",
+        )
+    elif {"total_assets", "stockholders_equity"} <= values.keys() and absent(
+        "stockholders_equity_incl_nci"
+    ):
+        add(
+            "total_liabilities",
+            values["total_assets"] - values["stockholders_equity"],
+            "total_assets - stockholders_equity (NCI-inclusive equity absent)",
+        )
+    if {"total_assets", "total_liabilities"} <= values.keys():
+        add(
+            "stockholders_equity_incl_nci",
+            values["total_assets"] - values["total_liabilities"],
+            "total_assets - total_liabilities",
+        )
+    if {"long_term_debt_noncurrent", "long_term_debt_current"} <= values.keys():
+        add(
+            "long_term_debt_total",
+            values["long_term_debt_noncurrent"] + values["long_term_debt_current"],
+            "long_term_debt_noncurrent + long_term_debt_current",
+        )
+    return derived, formulas
 
 
 def _load_multi_kpi_work_record(tool_context: ToolContext) -> MultiKpiWorkRecord | None:
@@ -614,7 +1061,7 @@ def _evidence_repair_queue(
 def record_multi_kpi_progress(
     reporting_currency: str | None,
     units_note: str | None,
-    kpis: list[MultiKpiEvidenceCandidate],
+    kpis: list[object],
     notes: list[MultiKpiNote],
     tool_context: ToolContext,
 ) -> dict:
@@ -623,13 +1070,11 @@ def record_multi_kpi_progress(
     Args:
         reporting_currency: Three-letter uppercase reporting currency, or null if still unknown.
         units_note: Short note describing observed statement scale, or null.
-        kpis: Evidence/coverage rows. A found row uses kpi, fiscal_year, status="found",
-            exact value_verbatim, page, line_label, year_label, and unit evidence. Exact unit_text
-            plus unit_page is required for thousands/millions/billions. statement and scope are
-            optional audit fields. Do not pass a calculated value: this tool parses, scales, and
-            signs it. Use status="explicit_zero" only for a printed dash/nil on the matching row
-            and year. Use status="absent" or "ambiguous" without a value for unresolved coverage;
-            those rows are retained for work tracking and omitted from the final LEDGER output.
+        kpis: Evidence/coverage rows. Prefer a source-backed found/explicit-zero row containing
+            only kpi, status, and a source_id from the active read_report_pages result. For report
+            prose without a source_id, use the full evidence fields. Use status="absent" or
+            "ambiguous" without a value for unresolved coverage; those rows are retained for work
+            tracking and omitted from the final LEDGER output.
         notes: Durable observations with category, text, and relevant report page numbers. Use
             categories evidence, unit, scope, decision, todo, or warning.
 
@@ -666,11 +1111,17 @@ def record_multi_kpi_progress(
                 prefix=f"notes.{note_index}",
             )
             note_errors.extend(response["validation_errors"])
-    incoming_kpis, evidence_errors, corrections = _normalize_multi_kpi_candidates(
+    expanded_kpis, source_errors, source_backed_indexes = _expand_source_backed_candidates(
         kpis,
+        tool_context,
+    )
+    incoming_kpis, evidence_errors, corrections = _normalize_multi_kpi_candidates(
+        expanded_kpis,
         pages,
         int(report.get("year", 0)),
+        source_backed_indexes=source_backed_indexes,
     )
+    evidence_errors = [*source_errors, *evidence_errors]
     metadata_errors = _multi_kpi_submission_errors(metadata, report)
     if metadata_errors:
         metadata = metadata.model_copy(update={"reporting_currency": None})
@@ -757,11 +1208,17 @@ def record_multi_kpi_progress(
     result = combined.model_dump()
     tool_context.state[MULTI_KPI_WORK_RECORD_STATE_KEY] = result
     extracted_count, status_counts = _work_record_counts(combined)
-    pending_kpis = _pending_multi_kpis(combined, int(report.get("year", 0)))
+    requested_kpis = _requested_multi_kpis(tool_context)
+    pending_kpis = _pending_multi_kpis(
+        combined,
+        int(report.get("year", 0)),
+        requested_kpis,
+        _structured_kpis(tool_context),
+    )
     response = {
         "status": "partial_success" if recoverable_errors else "success",
         "kpi_count": extracted_count,
-        "coverage_count": len(combined.kpis),
+        "coverage_count": len(requested_kpis) - len(pending_kpis),
         "pending_count": len(pending_kpis),
         "pending_kpis": pending_kpis,
         "status_counts": dict(status_counts),
@@ -822,150 +1279,24 @@ def query_multi_kpi_progress(view: MultiKpiRecordView, tool_context: ToolContext
     elif view == "notes":
         record = {"ticker": work_record.ticker, "notes": record["notes"]}
     extracted_count, status_counts = _work_record_counts(work_record)
-    pending_kpis = _pending_multi_kpis(work_record, int(report.get("year", 0)))
+    requested_kpis = _requested_multi_kpis(tool_context)
+    pending_kpis = _pending_multi_kpis(
+        work_record,
+        int(report.get("year", 0)),
+        requested_kpis,
+        _structured_kpis(tool_context),
+    )
     return {
         "status": "success",
         "view": view,
         "kpi_count": extracted_count,
-        "coverage_count": len(work_record.kpis),
+        "coverage_count": len(requested_kpis) - len(pending_kpis),
         "pending_count": len(pending_kpis),
         "pending_kpis": pending_kpis,
         "status_counts": dict(status_counts),
         "note_count": len(work_record.notes),
         "record": record,
     }
-
-
-def submit_needle_extraction(
-    found: bool,
-    value: float | None,
-    value_verbatim: str | None,
-    unit_scale: UnitScale | None,
-    page: int | None,
-    tool_context: ToolContext,
-) -> dict:
-    """Validate and store the final LEDGER-compatible needle answer.
-
-    Args:
-        found: Whether the exact KPI value was found for the requested fiscal year.
-        value: Normalized value in raw single units, or null when not found.
-        value_verbatim: Exact numeric token printed in the report, or null when not found.
-        unit_scale: Applied scale, or null when not found.
-        page: One-indexed cited report page, or null when not found.
-
-    Returns:
-        Success with the validated NeedleAnswer, or retryable field-level errors.
-    """
-    try:
-        answer = NeedleAnswer.model_validate(
-            {
-                "found": found,
-                "value": value,
-                "value_verbatim": value_verbatim,
-                "unit_scale": unit_scale,
-                "page": page,
-            }
-        )
-    except ValidationError as error:
-        return _validation_error_response(
-            error,
-            "answer does not match the LEDGER NeedleAnswer schema",
-        )
-
-    errors: list[dict[str, str]] = []
-    if answer.found:
-        if answer.unit_scale is None:
-            errors.append({"field": "unit_scale", "message": "found answers require a scale"})
-        if answer.page is None:
-            errors.append({"field": "page", "message": "found answers require a cited page"})
-        if answer.value is not None and not math.isfinite(answer.value):
-            errors.append({"field": "value", "message": "value must be a finite number"})
-    else:
-        errors.extend(
-            {
-                "field": field,
-                "message": "not-found answers require this field to be null",
-            }
-            for field in ("value", "value_verbatim", "unit_scale", "page")
-            if getattr(answer, field) is not None
-        )
-
-    report, pages, state_error = report_from_state(tool_context)
-    if state_error is not None:
-        return state_error
-    assert report is not None and pages is not None
-    kpi = tool_context.state.get(NEEDLE_KPI_STATE_KEY)
-    if not isinstance(kpi, str) or not kpi:
-        return {
-            "status": "error",
-            "retryable": False,
-            "error": "needle_kpi is missing from state",
-        }
-    valid_pages = {page_item.display_number for page_item in pages}
-    if answer.found and answer.page not in valid_pages:
-        errors.append(
-            {
-                "field": "page",
-                "message": "page must exist in the report stored in session state",
-            }
-        )
-    if errors:
-        return {
-            "status": "error",
-            "retryable": True,
-            "error": "answer failed basic data checks",
-            "validation_errors": errors,
-        }
-
-    normalized, normalization_trace = normalize_needle_answer(answer, kpi)
-    if normalized.found and normalization_trace["status"] == "unverified":
-        return {
-            "status": "error",
-            "retryable": True,
-            "error": "answer normalization could not be verified",
-            "validation_errors": [
-                {
-                    "field": "value",
-                    "message": str(normalization_trace.get("reason", "normalization failed")),
-                }
-            ],
-        }
-    if normalization_trace["status"] == "corrected":
-        return {
-            "status": "error",
-            "retryable": True,
-            "error": "value does not match value_verbatim and unit_scale",
-            "validation_errors": [
-                {
-                    "field": "value",
-                    "message": (
-                        f"expected normalized value {normalization_trace['computed_value']}"
-                    ),
-                }
-            ],
-        }
-
-    cited_page_text = next(
-        (page_item.text for page_item in pages if page_item.display_number == normalized.page),
-        None,
-    )
-    validated, evidence_trace = validate_needle_evidence(normalized, cited_page_text)
-    if normalized.found and not validated.found:
-        return {
-            "status": "error",
-            "retryable": True,
-            "error": "answer evidence validation failed",
-            "validation_errors": [
-                {
-                    "field": "value_verbatim",
-                    "message": str(evidence_trace.get("reason", "evidence validation failed")),
-                }
-            ],
-        }
-
-    result = validated.model_dump()
-    tool_context.state[NEEDLE_RESULT_STATE_KEY] = result
-    return {"status": "success", "result": result}
 
 
 def submit_multi_kpi_extraction(
@@ -1052,23 +1383,55 @@ def submit_multi_kpi_extraction(
         kpis=sorted(indexed.values(), key=lambda item: (item.fiscal_year, item.kpi)),
         notes=work_record.notes if work_record is not None else [],
     )
+    requested_kpis = _requested_multi_kpis(tool_context)
+    derived_values, derivation_formulas = _deterministic_derived_values(
+        combined,
+        int(report.get("year", 0)),
+    )
+    report_year = int(report.get("year", 0))
+    output_values = {
+        item.kpi: float(item.value)
+        for item in combined.kpis
+        if item.kpi in requested_kpis
+        and item.status in {"found", "explicit_zero"}
+        and item.value is not None
+    }
+    output_values.update(
+        {kpi: value for kpi, value in derived_values.items() if kpi in requested_kpis}
+    )
+    sec_facts = tool_context.state.get(SEC_FACTS_STATE_KEY, {})
+    structured_values = sec_facts.get("values", {}) if isinstance(sec_facts, dict) else {}
+    structured_audit: dict[str, Any] = {}
+    for kpi in requested_kpis:
+        fact = structured_values.get(kpi)
+        if not isinstance(fact, dict) or not isinstance(fact.get("value"), int | float):
+            continue
+        output_values[kpi] = float(fact["value"])
+        structured_audit[kpi] = {
+            "value": float(fact["value"]),
+            "concept": fact.get("concept"),
+            "source": fact.get("source") or sec_facts.get("source"),
+        }
     extraction = ReportExtraction(
         ticker=combined.ticker,
         reporting_currency=combined.reporting_currency,
         units_note=combined.units_note,
         kpis=[
             {
-                "kpi": item.kpi,
-                "fiscal_year": item.fiscal_year,
-                "value": item.value,
+                "kpi": kpi,
+                "fiscal_year": report_year,
+                "value": value,
             }
-            for item in combined.kpis
-            if item.status in {"found", "explicit_zero"}
+            for kpi, value in output_values.items()
         ],
     )
     errors = _multi_kpi_submission_errors(extraction, report)
-    report_year = int(report.get("year", 0))
-    pending_kpis = _pending_multi_kpis(combined, report_year)
+    pending_kpis = _pending_multi_kpis(
+        combined,
+        report_year,
+        requested_kpis,
+        _structured_kpis(tool_context),
+    )
     allow_partial = bool(tool_context.state.get(MULTI_KPI_ALLOW_PARTIAL_STATE_KEY))
     if pending_kpis and not allow_partial:
         errors.append(
@@ -1086,13 +1449,25 @@ def submit_multi_kpi_extraction(
             "retryable": True,
             "error": "combined extraction failed basic data checks",
             "validation_errors": errors,
-            "coverage_count": len(KPI_KEYS) - len(pending_kpis),
+            "coverage_count": len(requested_kpis) - len(pending_kpis),
             "pending_kpis": pending_kpis,
         }
 
     result = extraction.model_dump()
-    audit = combined.model_dump()
-    tool_context.state[MULTI_KPI_WORK_RECORD_STATE_KEY] = audit
+    work_record_result = combined.model_dump()
+    audit = {
+        **work_record_result,
+        "derivations": derivation_formulas,
+        "structured_facts": structured_audit,
+        "structured_sources": {
+            "sec_company_facts": {
+                "status": sec_facts.get("status"),
+                "source": sec_facts.get("source"),
+                "cik": sec_facts.get("cik"),
+            },
+        },
+    }
+    tool_context.state[MULTI_KPI_WORK_RECORD_STATE_KEY] = work_record_result
     tool_context.state[MULTI_KPI_AUDIT_STATE_KEY] = audit
     tool_context.state[MULTI_KPI_RESULT_STATE_KEY] = result
     actions = getattr(tool_context, "actions", None)
@@ -1101,16 +1476,43 @@ def submit_multi_kpi_extraction(
     return {
         "status": "success",
         "completion_status": "incomplete" if pending_kpis else "complete",
-        "coverage_count": len(KPI_KEYS) - len(pending_kpis),
+        "coverage_count": len(requested_kpis) - len(pending_kpis),
         "pending_kpis": pending_kpis,
         "result": result,
     }
+
+
+def finalize_multi_kpi_report(tool_context: ToolContext) -> dict:
+    """Submit the state-backed Multi-KPI result without duplicating evidence.
+
+    Returns:
+        Complete extraction when all KPI specialists have recorded a status, or
+        compact retryable feedback listing the remaining KPI specialists.
+    """
+    report, _pages, state_error = report_from_state(tool_context)
+    if state_error is not None:
+        return state_error
+    assert report is not None
+    work_record = _load_multi_kpi_work_record(tool_context)
+    return submit_multi_kpi_extraction(
+        ticker=str(report.get("ticker", "")),
+        reporting_currency=(work_record.reporting_currency if work_record is not None else None),
+        units_note=work_record.units_note if work_record is not None else None,
+        kpis=[],
+        tool_context=tool_context,
+    )
 
 
 _NULLABLE_STRING_SCHEMA = {
     "anyOf": [{"type": "string"}, {"type": "null"}],
 }
 _EVIDENCE_SCHEMA = MultiKpiEvidenceCandidate.model_json_schema()
+_RECORD_EVIDENCE_SCHEMA = deepcopy(_EVIDENCE_SCHEMA)
+_RECORD_EVIDENCE_SCHEMA["properties"]["source_id"] = {
+    "type": "string",
+    "minLength": 1,
+    "description": "Opaque source cell ID returned by the active read_report_pages result.",
+}
 _NOTE_SCHEMA = MultiKpiNote.model_json_schema()
 
 record_multi_kpi_progress_tool = JsonSchemaFunctionTool(
@@ -1123,7 +1525,7 @@ record_multi_kpi_progress_tool = JsonSchemaFunctionTool(
             "units_note": _NULLABLE_STRING_SCHEMA,
             "kpis": {
                 "type": "array",
-                "items": _EVIDENCE_SCHEMA,
+                "items": _RECORD_EVIDENCE_SCHEMA,
                 "maxItems": MAX_MULTI_KPI_RECORD_ROWS,
             },
             "notes": {"type": "array", "items": _NOTE_SCHEMA},

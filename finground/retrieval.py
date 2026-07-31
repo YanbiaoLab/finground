@@ -83,7 +83,12 @@ def expand_search_phrases(phrases: list[str]) -> list[str]:
 
 
 def rank_pages(
-    pages: list[Page], query: str, phrases: list[str], year: int | None
+    pages: list[Page],
+    query: str,
+    phrases: list[str],
+    year: int | None,
+    *,
+    preferred_page_numbers: frozenset[int] = frozenset(),
 ) -> list[SearchHit]:
     """Rank pages with BM25 plus transparent financial-structure features."""
     if not pages:
@@ -128,6 +133,7 @@ def rank_pages(
         table_markers = lowered.count("|") + lowered.count("<td") + lowered.count("<tr")
         table_signal = min(table_markers / 20.0, 1.5)
         weak_penalty = -2.0 if any(term in lowered for term in WEAK_SECTION_TERMS) else 0.0
+        preferred_statement = 20.0 if page.display_number in preferred_page_numbers else 0.0
         components = {
             "bm25": bm25,
             "exact_phrase": exact_phrase,
@@ -135,6 +141,7 @@ def rank_pages(
             "primary_statement": statement_signal,
             "table_density": table_signal,
             "weak_section_penalty": weak_penalty,
+            "preferred_statement": preferred_statement,
         }
         score = sum(components.values())
         hits.append(SearchHit(page=page, score=score, components=components))

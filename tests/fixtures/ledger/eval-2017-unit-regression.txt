@@ -1,0 +1,2 @@
+# Document-level unit inheritance regression.
+NYSE_ARI_2017

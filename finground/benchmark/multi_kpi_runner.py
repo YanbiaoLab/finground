@@ -32,14 +32,17 @@ from finground.agents.multi_kpi import (
     create_multi_kpi_app,
 )
 from finground.benchmark.adk_trajectory import AdkTrajectoryPlugin
+from finground.benchmark.answer_extractor import render_agent_answer
 from finground.benchmark.concurrency import map_concurrently
 from finground.benchmark.llm_budget import MultiKpiExecutionGuardPlugin
 from finground.benchmark.llm_metrics import LlmCallCounterPlugin, MultiKpiRunMetricsPlugin
 from finground.benchmark.parquet import iter_multi_reports
 from finground.documents import Report
 from finground.kpis import KPI_KEYS
+from finground.sec_facts import SEC_FACTS_ENABLED_STATE_KEY
 from finground.tools import (
     MULTI_KPI_AUDIT_STATE_KEY,
+    MULTI_KPI_REQUESTED_STATE_KEY,
     MULTI_KPI_RESULT_STATE_KEY,
     MULTI_KPI_WORK_RECORD_STATE_KEY,
     REPORT_STATE_KEY,
@@ -107,12 +110,17 @@ async def _run_report(
     execution_guard: MultiKpiExecutionGuardPlugin,
     run_metrics: MultiKpiRunMetricsPlugin,
     trajectory: AdkTrajectoryPlugin | None,
+    requested_kpis: tuple[str, ...] = KPI_KEYS,
 ) -> tuple[dict, dict]:
     app_name = MULTI_KPI_APP_NAME
     user_id = "benchmark"
     digest = hashlib.sha256(report.report_id.encode()).hexdigest()[:16]
     session_id = f"multi-{digest}"
-    state = {REPORT_STATE_KEY: build_report_state(report)}
+    state = {
+        REPORT_STATE_KEY: build_report_state(report),
+        MULTI_KPI_REQUESTED_STATE_KEY: list(requested_kpis),
+        SEC_FACTS_ENABLED_STATE_KEY: True,
+    }
     session_service = InMemorySessionService()
     await session_service.create_session(
         app_name=app_name,
@@ -127,10 +135,11 @@ async def _run_report(
         app=create_multi_kpi_app(plugins=plugins),
         session_service=session_service,
     )
+    scope = ", ".join(requested_kpis)
     prompt = (
-        f"Extract all supported LEDGER KPIs from report {report.report_id}. "
-        "Inspect the report through the state-backed tools and submit the final result with "
-        "submit_multi_kpi_extraction."
+        f"Extract these LEDGER KPIs from report {report.report_id}: {scope}. "
+        "Prepare the report through the common workflow agent, delegate every KPI to its matching "
+        "specialist, then ask the common workflow agent to audit and submit the result."
     )
     message = types.Content(role="user", parts=[types.Part.from_text(text=prompt)])
     limit_error: LlmCallsLimitExceededError | None = None
@@ -196,17 +205,15 @@ def _select_reports(
 async def _process_report(
     report: Report,
     *,
+    requested_kpis: tuple[str, ...] = KPI_KEYS,
     trajectory_dir: Path | None = None,
 ) -> tuple[Report, dict]:
     started = time.monotonic()
     llm_counter = LlmCallCounterPlugin(
         max_calls=MULTI_KPI_LLM_CALL_LIMIT,
-        force_tool_at_call=MULTI_KPI_SUBMISSION_DEADLINE,
-        forced_tool_name="submit_multi_kpi_extraction",
     )
     execution_guard = MultiKpiExecutionGuardPlugin(
         max_calls=MULTI_KPI_LLM_CALL_LIMIT,
-        max_searches=MULTI_KPI_SEARCH_LIMIT,
     )
     run_metrics = MultiKpiRunMetricsPlugin()
     trajectory = (
@@ -221,13 +228,17 @@ async def _process_report(
             execution_guard,
             run_metrics,
             trajectory,
+            requested_kpis=requested_kpis,
         )
         covered = {
             item.get("kpi")
             for item in audit.get("kpis", [])
             if item.get("fiscal_year") == report.year
         }
-        pending_kpis = [kpi for kpi in KPI_KEYS if kpi not in covered]
+        structured_facts = audit.get("structured_facts", {})
+        if isinstance(structured_facts, dict):
+            covered.update(kpi for kpi in structured_facts if kpi in KPI_KEYS)
+        pending_kpis = [kpi for kpi in requested_kpis if kpi not in covered]
         complete = not pending_kpis
         record = {
             "ticker": report.ticker,
@@ -238,11 +249,12 @@ async def _process_report(
             "prompt_version": MULTI_KPI_PROMPT_VERSION,
             "status": "ok" if complete else "incomplete",
             "extraction": extraction,
+            "answer": render_agent_answer(extraction),
             "audit": audit,
             "error": (
                 None if complete else f"incomplete KPI coverage: {len(pending_kpis)} pending"
             ),
-            "coverage_count": len(KPI_KEYS) - len(pending_kpis),
+            "coverage_count": len(requested_kpis) - len(pending_kpis),
             "pending_kpis": pending_kpis,
             "llm_calls": llm_counter.count,
             "prevented_early_stops": execution_guard.prevented_early_stops,
@@ -262,7 +274,7 @@ async def _process_report(
             "audit": None,
             "error": f"{type(error).__name__}: {error}",
             "coverage_count": 0,
-            "pending_kpis": list(KPI_KEYS),
+            "pending_kpis": list(requested_kpis),
             "llm_calls": llm_counter.count,
             "prevented_early_stops": execution_guard.prevented_early_stops,
             "execution_metrics": run_metrics.snapshot(),
@@ -295,8 +307,16 @@ async def run_multi_kpi(
     reports_file: Path | None,
     resume: bool,
     concurrency: int,
+    requested_kpis: tuple[str, ...] = KPI_KEYS,
 ) -> dict:
     """Run bounded concurrent state-backed ADK extraction per report."""
+    if not requested_kpis:
+        raise ValueError("at least one KPI must be requested")
+    unknown_kpis = set(requested_kpis).difference(KPI_KEYS)
+    if unknown_kpis:
+        raise ValueError(f"unknown KPI keys: {', '.join(sorted(unknown_kpis))}")
+    if len(set(requested_kpis)) != len(requested_kpis):
+        raise ValueError("requested KPI keys must be unique")
     reports = iter_multi_reports(parquet_path)
     wanted = _load_report_filter(reports_file)
 
@@ -331,7 +351,11 @@ async def run_multi_kpi(
     )
     async for report, record in map_concurrently(
         selected_reports,
-        partial(_process_report, trajectory_dir=trajectory_dir),
+        partial(
+            _process_report,
+            requested_kpis=requested_kpis,
+            trajectory_dir=trajectory_dir,
+        ),
         limit=concurrency,
     ):
         processed += 1
@@ -370,6 +394,7 @@ async def run_multi_kpi(
         "reports_processed": processed,
         "reports_resumed": selection_stats.resumed,
         "report_ids": selection_stats.report_ids,
+        "requested_kpis": list(requested_kpis),
         "ok": ok,
         "incomplete": incomplete,
         "failed": failed,
@@ -385,7 +410,7 @@ async def run_multi_kpi(
             "max_prompt_tokens": max_prompt_tokens,
         },
         "llm_call_limit": MULTI_KPI_LLM_CALL_LIMIT,
-        "search_call_limit": MULTI_KPI_SEARCH_LIMIT,
+        "search_call_limit_per_specialist": MULTI_KPI_SEARCH_LIMIT,
         "adk_run_call_limit": MULTI_KPI_SUBMISSION_DEADLINE,
         "max_output_tokens": MULTI_KPI_MAX_OUTPUT_TOKENS,
         "submission_deadline": MULTI_KPI_SUBMISSION_DEADLINE,
@@ -397,7 +422,9 @@ async def run_multi_kpi(
         "context_management": {
             "adk_context_filter": "recorded_multi_kpi",
             "checkpoint_state": "multi_kpi_work_record",
-            "older_tool_payloads": "single_active_retrieval_batch",
+            "child_contexts": "fresh_in_memory_session_per_agent_tool_call",
+            "coordinator_payloads": "compact_specialist_results_only",
+            "older_tool_payloads": "single_active_retrieval_batch_per_specialist",
             "model_context_window_tokens": MULTI_KPI_CONTEXT_WINDOW_TOKENS,
             "llm_event_summarization": False,
         },
@@ -425,6 +452,7 @@ def run_multi_kpi_sync(
     reports_file: Path | None,
     resume: bool,
     concurrency: int,
+    requested_kpis: tuple[str, ...] = KPI_KEYS,
 ) -> dict:
     """Run the bounded Multi-KPI benchmark from synchronous callers."""
     return asyncio.run(
@@ -435,5 +463,30 @@ def run_multi_kpi_sync(
             reports_file=reports_file,
             resume=resume,
             concurrency=concurrency,
+            requested_kpis=requested_kpis,
         )
+    )
+
+
+def run_kpi_sync(
+    *,
+    kpi: str,
+    parquet_path: Path,
+    output_dir: Path,
+    limit_reports: int | None,
+    reports_file: Path | None,
+    resume: bool,
+    concurrency: int,
+) -> dict:
+    """Run one KPI specialist through the production coordinator and LEDGER input path."""
+    if kpi not in KPI_KEYS:
+        raise ValueError(f"unknown KPI key: {kpi}")
+    return run_multi_kpi_sync(
+        parquet_path=parquet_path,
+        output_dir=output_dir,
+        limit_reports=limit_reports,
+        reports_file=reports_file,
+        resume=resume,
+        concurrency=concurrency,
+        requested_kpis=(kpi,),
     )

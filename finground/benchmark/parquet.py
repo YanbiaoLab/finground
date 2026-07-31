@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -11,17 +10,6 @@ import pyarrow.parquet as pq
 from finground.documents import Report
 
 REPORT_COLUMNS = ("ticker", "exchange", "year", "mmd_text")
-NEEDLE_COLUMNS = ("query_id", "query_text", *REPORT_COLUMNS)
-
-
-@dataclass(frozen=True, slots=True)
-class NeedleCase:
-    """One prediction-time needle input without answer or qrel fields."""
-
-    query_id: str
-    query_text: str
-    report_id: str
-    report: Report | None
 
 
 def parquet_files(path: Path) -> list[Path]:
@@ -78,23 +66,3 @@ def iter_multi_reports(path: Path) -> Iterator[Report]:
             continue
         seen.add(report.report_id)
         yield report
-
-
-def iter_needle_cases(path: Path) -> Iterator[NeedleCase]:
-    """Yield KPI-QA cases while projecting out qrels and answer fields."""
-    seen: set[str] = set()
-    for row in iter_parquet_rows(path, NEEDLE_COLUMNS, batch_size=16):
-        if row["query_id"] is None or row["query_text"] is None:
-            raise ValueError("query_id and query_text must not be null")
-        query_id = str(row["query_id"]).strip()
-        query_text = str(row["query_text"]).strip()
-        if not query_id or not query_text or query_id in seen:
-            continue
-        seen.add(query_id)
-        report = _report(row)
-        yield NeedleCase(
-            query_id=query_id,
-            query_text=query_text,
-            report_id=report.report_id,
-            report=report,
-        )

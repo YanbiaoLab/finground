@@ -7,8 +7,13 @@ import copy
 from google.genai import types
 
 MULTI_KPI_RECORD_TOOL = "record_multi_kpi_progress"
-_RETRIEVAL_TOOL_NAMES = {"read_report_pages", "search_report"}
+_RETRIEVAL_TOOL_NAMES = {
+    "inspect_primary_statements",
+    "read_report_pages",
+    "search_report",
+}
 _COMPACTABLE_TOOL_NAMES = {
+    "inspect_primary_statements",
     "query_multi_kpi_progress",
     "read_report_pages",
     "search_report",

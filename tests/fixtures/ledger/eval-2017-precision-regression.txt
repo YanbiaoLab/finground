@@ -1,0 +1,3 @@
+# Capex additions and combined-zero debt precision regressions.
+NYSE_BTE_2017
+NASDAQ_ORLY_2017

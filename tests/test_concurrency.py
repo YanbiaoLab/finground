@@ -7,11 +7,9 @@ import pyarrow.parquet as pq
 import pytest
 
 import finground.benchmark.multi_kpi_runner as multi_runner
-import finground.benchmark.needle_runner as needle_runner
 from finground.benchmark.concurrency import map_concurrently
 from finground.documents import Report
 from finground.kpis import KPI_KEYS
-from finground.models import NeedleAnswer
 
 MMD_TEXT = """# Annual Report
 <--- Page Split --->
@@ -52,53 +50,6 @@ def test_bounded_map_rejects_non_positive_limit() -> None:
         asyncio.run(run())
 
 
-def test_needle_runner_applies_concurrency_limit(tmp_path: Path, monkeypatch) -> None:
-    parquet_path = tmp_path / "needle.parquet"
-    pq.write_table(
-        pa.table(
-            {
-                "query_id": [f"ACME_revenue_{year}" for year in range(2020, 2024)],
-                "query_text": ["What was revenue?"] * 4,
-                "ticker": ["ACME"] * 4,
-                "exchange": ["NYSE"] * 4,
-                "year": list(range(2020, 2024)),
-                "mmd_text": [MMD_TEXT] * 4,
-            }
-        ),
-        parquet_path,
-    )
-    active = 0
-    peak = 0
-
-    async def fake_run_query(_case, llm_counter) -> NeedleAnswer:
-        nonlocal active, peak
-        active += 1
-        peak = max(peak, active)
-        await asyncio.sleep(0.01)
-        active -= 1
-        llm_counter.count += 2
-        return NeedleAnswer(found=False)
-
-    monkeypatch.setattr(needle_runner, "_run_query", fake_run_query)
-    output_dir = tmp_path / "needle-output"
-
-    metadata = needle_runner.run_needle_sync(
-        parquet_path=parquet_path,
-        output_dir=output_dir,
-        limit_queries=None,
-        concurrency=2,
-    )
-
-    records = [
-        json.loads(line) for line in (output_dir / "responses.jsonl").read_text().splitlines()
-    ]
-    assert len(records) == 4
-    assert peak == 2
-    assert metadata["concurrency"] == 2
-    assert metadata["total_llm_calls"] == 8
-    assert {record["llm_calls"] for record in records} == {2}
-
-
 def test_multi_runner_applies_concurrency_limit(tmp_path: Path, monkeypatch) -> None:
     parquet_path = tmp_path / "multi.parquet"
     pq.write_table(
@@ -121,7 +72,9 @@ def test_multi_runner_applies_concurrency_limit(tmp_path: Path, monkeypatch) -> 
         _budget_reminder,
         _run_metrics,
         _trajectory,
+        requested_kpis=KPI_KEYS,
     ) -> tuple[dict, dict]:
+        del requested_kpis
         nonlocal active, peak
         active += 1
         peak = max(peak, active)
@@ -164,13 +117,13 @@ def test_multi_runner_applies_concurrency_limit(tmp_path: Path, monkeypatch) -> 
     assert peak == 2
     assert metadata["concurrency"] == 2
     assert metadata["total_llm_calls"] == 12
-    assert metadata["llm_call_limit"] == 50
-    assert metadata["search_call_limit"] == 7
-    assert metadata["adk_run_call_limit"] == 50
-    assert metadata["prompt_version"] == "evidence-v8"
+    assert metadata["llm_call_limit"] == 200
+    assert metadata["search_call_limit_per_specialist"] == 2
+    assert metadata["adk_run_call_limit"] == 200
+    assert metadata["prompt_version"] == "independent-kpi-agents-v9"
     assert metadata["ok"] == 4
     assert metadata["incomplete"] == 0
-    assert metadata["submission_deadline"] == 50
+    assert metadata["submission_deadline"] == 200
     assert metadata["max_output_tokens"] == 4_096
     assert metadata["total_prevented_early_stops"] == 0
     assert metadata["execution_metrics"] == {
@@ -182,12 +135,14 @@ def test_multi_runner_applies_concurrency_limit(tmp_path: Path, monkeypatch) -> 
         "repeated_validation_error_calls": 0,
         "max_prompt_tokens": 0,
     }
-    assert metadata["budget_reminder_calls"] == [30, 40]
+    assert metadata["budget_reminder_calls"] == [120, 160]
     assert len(metadata["report_ids"]) == 4
     assert metadata["context_management"] == {
         "adk_context_filter": "recorded_multi_kpi",
         "checkpoint_state": "multi_kpi_work_record",
-        "older_tool_payloads": "single_active_retrieval_batch",
+        "child_contexts": "fresh_in_memory_session_per_agent_tool_call",
+        "coordinator_payloads": "compact_specialist_results_only",
+        "older_tool_payloads": "single_active_retrieval_batch_per_specialist",
         "model_context_window_tokens": 131_072,
         "llm_event_summarization": False,
     }
@@ -223,7 +178,9 @@ def test_multi_runner_retains_llm_calls_when_report_fails(monkeypatch) -> None:
         _budget_reminder,
         _run_metrics,
         _trajectory,
+        requested_kpis=KPI_KEYS,
     ) -> dict:
+        del requested_kpis
         llm_counter.count += 4
         raise RuntimeError("model failed")
 
@@ -243,7 +200,9 @@ def test_multi_runner_marks_partial_submission_incomplete(monkeypatch) -> None:
         _budget_reminder,
         _run_metrics,
         _trajectory,
+        requested_kpis=KPI_KEYS,
     ) -> tuple[dict, dict]:
+        del requested_kpis
         llm_counter.count += 3
         extraction = {
             "ticker": report.ticker,

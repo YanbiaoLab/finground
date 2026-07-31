@@ -5,21 +5,29 @@ import pytest
 
 from finground.documents import Report
 from finground.kpis import KPI_KEYS
+from finground.sec_facts import (
+    SEC_FACTS_ENABLED_STATE_KEY,
+    SEC_FACTS_STATE_KEY,
+)
 from finground.tools import (
     MULTI_KPI_ALLOW_PARTIAL_STATE_KEY,
     MULTI_KPI_AUDIT_STATE_KEY,
+    MULTI_KPI_PREPARED_STATE_KEY,
+    MULTI_KPI_REQUESTED_STATE_KEY,
     MULTI_KPI_RESULT_STATE_KEY,
     MULTI_KPI_WORK_RECORD_STATE_KEY,
-    NEEDLE_KPI_STATE_KEY,
-    NEEDLE_RESULT_STATE_KEY,
     build_report_state,
+    finalize_multi_kpi_report,
+    find_kpi_source_candidates,
     get_report_info,
+    inspect_primary_statements,
+    prepare_multi_kpi_report,
     query_multi_kpi_progress,
     read_report_pages,
     record_multi_kpi_progress,
+    search_kpi_report,
     search_report,
     submit_multi_kpi_extraction,
-    submit_needle_extraction,
 )
 
 REPORT = Path(__file__).parent / "fixtures" / "ledger" / "report.mmd"
@@ -27,10 +35,7 @@ REPORT = Path(__file__).parent / "fixtures" / "ledger" / "report.mmd"
 
 def _context() -> SimpleNamespace:
     report = Report("NYSE_ACME_2023", "NYSE", "ACME", 2023, REPORT.read_text())
-    state = {
-        "report": build_report_state(report),
-        NEEDLE_KPI_STATE_KEY: "revenue",
-    }
+    state = {"report": build_report_state(report)}
     return SimpleNamespace(
         state=state,
         actions=SimpleNamespace(skip_summarization=None),
@@ -196,6 +201,354 @@ def test_get_report_info_includes_adjacent_titled_continuation_page() -> None:
     assert result["statement_pages"]["cash_flow_statement"] == [1, 2]
 
 
+def test_inspect_primary_statements_returns_classified_pages_and_source_cells() -> None:
+    result = inspect_primary_statements(_context())
+
+    assert result["status"] == "success"
+    assert result["statement_pages"]["income_statement"] == [3]
+    assert [page["page"] for page in result["pages"]] == [3]
+    assert result["pages"][0]["statement_group"] == "income_statement"
+    assert result["source_cell_count"] > 0
+    assert any(cell["row_label"] == "Revenue" for cell in result["pages"][0]["source_cells"])
+
+
+def test_prepare_report_keeps_full_pages_out_of_common_agent_result() -> None:
+    context = _context()
+
+    result = prepare_multi_kpi_report(context)
+
+    assert result["status"] == "success"
+    assert result["report_id"] == "NYSE_ACME_2023"
+    assert result["fiscal_year"] == 2023
+    assert result["source_cell_count"] > 0
+    assert "pages" not in result
+    assert context.state[MULTI_KPI_PREPARED_STATE_KEY] == result
+    assert prepare_multi_kpi_report(context)["reused"] is True
+
+
+def test_prepare_structured_facts_finalize_without_specialist_rows(
+    monkeypatch,
+) -> None:
+    context = _context()
+    context.state[SEC_FACTS_ENABLED_STATE_KEY] = True
+    context.state[MULTI_KPI_REQUESTED_STATE_KEY] = ["revenue"]
+    monkeypatch.setattr(
+        "finground.tools.report.resolve_sec_kpis",
+        lambda *_args, **_kwargs: {
+            "status": "success",
+            "source": "https://data.sec.gov/example",
+            "values": {
+                "revenue": {
+                    "value": 1_234_000_000.0,
+                    "concept": "Revenues",
+                },
+            },
+        },
+    )
+
+    prepared = prepare_multi_kpi_report(context)
+    progress = query_multi_kpi_progress("kpis", context)
+    finalized = finalize_multi_kpi_report(context)
+
+    assert prepared["structured_kpis"] == ["revenue"]
+    assert progress["pending_kpis"] == []
+    assert finalized["status"] == "success"
+    assert finalized["result"]["kpis"] == [
+        {"kpi": "revenue", "fiscal_year": 2023, "value": 1_234_000_000.0},
+    ]
+    assert (
+        context.state[MULTI_KPI_AUDIT_STATE_KEY]["structured_facts"]["revenue"]["source"]
+        == "https://data.sec.gov/example"
+    )
+    assert context.state[MULTI_KPI_AUDIT_STATE_KEY]["structured_sources"] == {
+        "sec_company_facts": {
+            "status": "success",
+            "source": "https://data.sec.gov/example",
+            "cik": None,
+        },
+    }
+
+
+def test_kpi_candidate_lookup_returns_only_compact_ranked_source_cells() -> None:
+    context = _context()
+
+    result = find_kpi_source_candidates("revenue", context)
+
+    assert result["status"] == "success"
+    assert result["kpi"] == "revenue"
+    assert result["fiscal_year"] == 2023
+    assert result["candidates"][0]["row_label"] == "Revenue"
+    assert result["candidates"][0]["source_id"] == "p3:t0:r1:c1"
+    assert "text" not in result["candidates"][0]
+
+
+def test_primary_statement_without_header_uses_first_value_as_report_year() -> None:
+    report = Report(
+        "NASDAQ_ACME_2023",
+        "NASDAQ",
+        "ACME",
+        2023,
+        """\
+## Consolidated Statements of Operations
+For the years ended December 31, 2023 and 2022
+(in thousands)
+<table><tr><td>Revenue</td><td>$</td><td>-</td><td>$</td><td>-</td></tr>
+<tr><td>General and administrative</td><td>6,980</td><td>1,748</td></tr>
+<tr><td>Operating income</td><td>(100)</td><td>50</td></tr>
+<tr><td>Net income</td><td>(120)</td><td>40</td></tr></table>
+""",
+    )
+    context = SimpleNamespace(
+        state={"report": build_report_state(report)},
+        actions=SimpleNamespace(skip_summarization=None),
+    )
+
+    result = read_report_pages([1], [], context)
+    cells = result["pages"][0]["source_cells"]
+    revenue = next(cell for cell in cells if cell["row_label"] == "Revenue")
+    sga = next(cell for cell in cells if cell["row_label"] == "General and administrative")
+
+    assert revenue["status"] == "explicit_zero"
+    assert revenue["value_verbatim"] == "-"
+    assert revenue["year_inferred"] is True
+    assert sga["value_verbatim"] == "6,980"
+    assert sga["year_label"] == "2023 (first value column)"
+    recorded = record_multi_kpi_progress(
+        "USD",
+        None,
+        [
+            {
+                "kpi": "sga_expense",
+                "fiscal_year": 2023,
+                "status": "found",
+                "source_id": sga["source_id"],
+            }
+        ],
+        [],
+        context,
+    )
+    assert recorded["status"] == "success"
+    assert context.state[MULTI_KPI_WORK_RECORD_STATE_KEY]["kpis"][0]["value"] == 6_980_000
+
+
+def test_statement_classifier_includes_adjacent_continuation_page() -> None:
+    report = Report(
+        "NYSE_ACME_2023",
+        "NYSE",
+        "ACME",
+        2023,
+        """\
+## Consolidated Balance Sheets
+<table><tr><td></td><td>2023</td><td>2022</td></tr>
+<tr><td>Current assets</td><td>10</td><td>9</td></tr>
+<tr><td>Total assets</td><td>20</td><td>18</td></tr>
+<tr><td>Current liabilities</td><td>5</td><td>4</td></tr></table>
+<--- Page Split --->
+<table><tr><td>Total liabilities</td><td>8</td><td>7</td></tr>
+<tr><td>Total stockholders' equity</td><td>12</td><td>11</td></tr></table>
+""",
+    )
+    context = SimpleNamespace(state={"report": build_report_state(report)})
+
+    result = get_report_info(context)
+
+    assert result["statement_pages"]["balance_sheet"] == [1, 2]
+
+
+def test_period_end_share_count_is_extracted_from_verbose_balance_sheet_label() -> None:
+    report = Report(
+        "NASDAQ_ACME_2023",
+        "NASDAQ",
+        "ACME",
+        2023,
+        """\
+## Consolidated Balance Sheets
+<table><tr><td></td><td>December 31, 2023</td><td>December 31, 2022</td></tr>
+<tr><td>Current assets</td><td>10</td><td>9</td></tr>
+<tr><td>Total assets</td><td>20</td><td>18</td></tr>
+<tr><td>Total liabilities</td><td>8</td><td>7</td></tr>
+<tr><td>Common stock, $0.01 par value; 200,000,000 shares authorized;
+55,831,549 and 49,153,463 shares issued and outstanding, respectively</td>
+<td>558</td><td>492</td></tr></table>
+""",
+    )
+    context = SimpleNamespace(
+        state={"report": build_report_state(report)},
+        actions=SimpleNamespace(skip_summarization=None),
+    )
+
+    candidates = find_kpi_source_candidates("shares_outstanding", context)["candidates"]
+    embedded = next(
+        candidate for candidate in candidates if candidate["source_id"].startswith("p1:shares:")
+    )
+    result = record_multi_kpi_progress(
+        "USD",
+        None,
+        [
+            {
+                "kpi": "shares_outstanding",
+                "fiscal_year": 2023,
+                "status": "found",
+                "source_id": embedded["source_id"],
+            }
+        ],
+        [],
+        context,
+    )
+
+    assert embedded["value_verbatim"] == "55,831,549"
+    assert result["status"] == "success"
+    assert context.state[MULTI_KPI_WORK_RECORD_STATE_KEY]["kpis"][0]["value"] == 55_831_549
+
+
+def test_finalization_applies_ledger_aligned_gross_profit_identity() -> None:
+    context = _context()
+    context.state[MULTI_KPI_REQUESTED_STATE_KEY] = ["gross_profit"]
+    context.state[MULTI_KPI_WORK_RECORD_STATE_KEY] = {
+        "ticker": "ACME",
+        "reporting_currency": "USD",
+        "units_note": "millions",
+        "kpis": [
+            {
+                "kpi": "revenue",
+                "fiscal_year": 2023,
+                "status": "found",
+                "value_verbatim": "1,234",
+                "unit_scale": "millions",
+                "page": 3,
+                "line_label": "Revenue",
+                "year_label": "2023",
+                "value": 1_234_000_000,
+            },
+            {
+                "kpi": "cost_of_revenue",
+                "fiscal_year": 2023,
+                "status": "found",
+                "value_verbatim": "700",
+                "unit_scale": "millions",
+                "page": 3,
+                "line_label": "Cost of revenue",
+                "year_label": "2023",
+                "value": 700_000_000,
+            },
+            {
+                "kpi": "gross_profit",
+                "fiscal_year": 2023,
+                "status": "absent",
+            },
+        ],
+        "notes": [],
+    }
+
+    result = finalize_multi_kpi_report(context)
+
+    assert result["status"] == "success"
+    assert context.state[MULTI_KPI_RESULT_STATE_KEY]["kpis"] == [
+        {
+            "kpi": "gross_profit",
+            "fiscal_year": 2023,
+            "value": 534_000_000.0,
+        }
+    ]
+    assert context.state[MULTI_KPI_AUDIT_STATE_KEY]["derivations"] == [
+        "gross_profit = revenue - cost_of_revenue"
+    ]
+
+
+def test_unlabeled_structural_total_is_source_backed_evidence() -> None:
+    report = Report(
+        "NYSE_ACME_2023",
+        "NYSE",
+        "ACME",
+        2023,
+        """\
+## Consolidated Statements of Cash Flows
+(thousands of dollars)
+<table><tr><td>Year ended</td><td>2023</td><td>2022</td></tr>
+<tr><td>Operating activities</td><td></td><td></td></tr>
+<tr><td>Adjustments for:</td><td></td><td></td></tr>
+<tr><td>Depreciation and amortization</td><td>100</td><td>90</td></tr>
+<tr><td>Change in working capital</td><td>20</td><td>10</td></tr>
+<tr><td></td><td>325,208</td><td>247,365</td></tr>
+<tr><td>Financing activities</td><td></td><td></td></tr></table>
+""",
+    )
+    context = SimpleNamespace(
+        state={"report": build_report_state(report)},
+        actions=SimpleNamespace(skip_summarization=None),
+    )
+
+    read_result = read_report_pages([1], [], context)
+    structural_cell = next(
+        cell
+        for cell in read_result["pages"][0]["source_cells"]
+        if cell["source_id"] == "p1:t0:r5:c1"
+    )
+
+    assert structural_cell["printed_row_label"] is None
+    assert structural_cell["row_role"] == "unlabeled_numeric"
+    assert structural_cell["section_label"] == "Operating activities"
+    assert structural_cell["next_label"] == "Financing activities"
+
+    record_result = record_multi_kpi_progress(
+        "USD",
+        "thousands of dollars",
+        [
+            {
+                "kpi": "operating_cash_flow",
+                "fiscal_year": 2023,
+                "status": "found",
+                "source_id": structural_cell["source_id"],
+            }
+        ],
+        [],
+        context,
+    )
+
+    assert record_result["status"] == "success"
+    assert context.state[MULTI_KPI_WORK_RECORD_STATE_KEY]["kpis"][0]["value"] == 325_208_000
+
+
+def test_source_backed_explicit_zero_does_not_require_unit_text() -> None:
+    report = Report(
+        "NYSE_ACME_2023",
+        "NYSE",
+        "ACME",
+        2023,
+        """\
+## Consolidated Balance Sheets
+<table><tr><td>Year ended</td><td>2023</td><td>2022</td></tr>
+<tr><td>Inventory</td><td>—</td><td>10</td></tr></table>
+""",
+    )
+    context = SimpleNamespace(
+        state={"report": build_report_state(report)},
+        actions=SimpleNamespace(skip_summarization=None),
+    )
+    read_result = read_report_pages([1], [], context)
+    source_cell = next(
+        cell for cell in read_result["pages"][0]["source_cells"] if cell["row_label"] == "Inventory"
+    )
+
+    result = record_multi_kpi_progress(
+        "USD",
+        None,
+        [
+            {
+                "kpi": "inventory",
+                "fiscal_year": 2023,
+                "status": "explicit_zero",
+                "source_id": source_cell["source_id"],
+            }
+        ],
+        [],
+        context,
+    )
+
+    assert result["status"] == "success"
+    assert context.state[MULTI_KPI_WORK_RECORD_STATE_KEY]["kpis"][0]["value"] == 0.0
+
+
 def test_search_report_combines_ranked_and_exact_phrase_search() -> None:
     result = search_report(
         "",
@@ -209,6 +562,72 @@ def test_search_report_combines_ranked_and_exact_phrase_search() -> None:
     assert result["results"][0]["page"] == 3
     assert result["results"][0]["matched_phrases"] == ["Consolidated Statements of Operations"]
     assert "Consolidated Statements of Operations" in result["results"][0]["snippet"]
+
+
+def test_search_kpi_report_prefers_the_kpis_primary_statement() -> None:
+    result = search_kpi_report(
+        "revenue",
+        "financial result",
+        ["revenue"],
+        2023,
+        3,
+        _context(),
+    )
+
+    assert result["status"] == "success"
+    assert result["preferred_statement_group"] == "income_statement"
+    assert result["preferred_pages"] == [3]
+    assert result["results"][0]["page"] == 3
+
+
+def test_document_level_unit_is_inherited_with_traceable_source_page() -> None:
+    report = Report(
+        "NYSE_UNIT_2023",
+        "NYSE",
+        "UNIT",
+        2023,
+        (
+            "All currency figures expressed herein are expressed in thousands, "
+            "except share or per share amounts.\n"
+            "<--- Page Split --->\n"
+            "# Note — Accounts payable\n"
+            "<table><tr><td></td><td>2023</td></tr>"
+            "<tr><td>Accounts payable</td><td>1,534</td></tr></table>"
+        ),
+    )
+    context = SimpleNamespace(
+        state={
+            "report": build_report_state(report),
+            SEC_FACTS_ENABLED_STATE_KEY: False,
+        },
+        actions=SimpleNamespace(skip_summarization=None),
+    )
+
+    result = find_kpi_source_candidates("accounts_payable", context)
+
+    assert result["status"] == "success"
+    candidate = result["candidates"][0]
+    assert candidate["unit_scope"] == "document"
+    assert candidate["unit_page"] == 1
+    assert "in thousands" in candidate["unit_text"]
+
+    recorded = record_multi_kpi_progress(
+        None,
+        None,
+        [
+            {
+                "kpi": "accounts_payable",
+                "fiscal_year": 2023,
+                "status": "found",
+                "source_id": candidate["source_id"],
+            }
+        ],
+        [],
+        context,
+    )
+
+    assert recorded["status"] == "success"
+    assert context.state[MULTI_KPI_WORK_RECORD_STATE_KEY]["kpis"][0]["value"] == 1_534_000
 
 
 def test_search_report_reads_only_state_backed_report() -> None:
@@ -485,6 +904,25 @@ def test_query_multi_kpi_progress_supports_bounded_views() -> None:
     }
 
 
+def test_structured_facts_count_as_covered_without_report_agent_rows() -> None:
+    context = _context()
+    context.state[SEC_FACTS_STATE_KEY] = {
+        "status": "success",
+        "source": "https://data.sec.gov/example",
+        "values": {
+            "revenue": {
+                "value": 1_234_000_000.0,
+                "concept": "Revenues",
+            }
+        },
+    }
+
+    result = query_multi_kpi_progress("kpis", context)
+
+    assert result["coverage_count"] == 1
+    assert result["pending_kpis"] == [kpi for kpi in KPI_KEYS if kpi != "revenue"]
+
+
 def test_record_multi_kpi_progress_rejects_invalid_note_without_mutating_state() -> None:
     context = _context()
 
@@ -666,6 +1104,27 @@ def test_record_multi_kpi_progress_rejects_multiplier_without_visible_unit_text(
             "message": "scaled values require exact visible unit_text and unit_page",
         }
     ]
+
+
+def test_record_rejects_generic_current_noncurrent_liabilities_as_debt() -> None:
+    context = _context()
+    evidence = _evidence(
+        kpi="long_term_debt_current",
+        value_verbatim="6.108",
+        line_label="Current portion of non-current liabilities",
+    )
+
+    result = record_multi_kpi_progress("USD", "millions", [evidence], [], context)
+
+    assert result["status"] == "partial_success"
+    assert result["validation_errors"][0] == {
+        "field": "kpis.0.line_label",
+        "message": (
+            "semantic mismatch: long_term_debt_current requires a debt, borrowing, "
+            "note, or lease row; a generic current portion of all non-current "
+            "liabilities is too broad"
+        ),
+    }
 
 
 def test_record_multi_kpi_progress_rejects_units_when_page_header_is_scaled() -> None:
@@ -966,66 +1425,14 @@ def test_submit_multi_kpi_accepts_fully_covered_all_missing_report() -> None:
     }
 
 
-def test_submit_needle_returns_feedback_without_mutating_state() -> None:
+def test_finalize_multi_kpi_report_submits_from_recorded_state() -> None:
     context = _context()
+    coverage = [{"kpi": kpi, "fiscal_year": 2023, "status": "absent"} for kpi in KPI_KEYS]
+    recorded = record_multi_kpi_progress(None, None, coverage, [], context)
 
-    result = submit_needle_extraction(
-        True,
-        1_234,
-        "1,234",
-        "millions",
-        3,
-        context,
-    )
+    result = finalize_multi_kpi_report(context)
 
-    assert result["status"] == "error"
-    assert result["retryable"] is True
-    assert result["validation_errors"][0]["field"] == "value"
-    assert NEEDLE_RESULT_STATE_KEY not in context.state
-
-
-def test_submit_needle_rejects_a_page_outside_the_state_report() -> None:
-    context = _context()
-
-    result = submit_needle_extraction(
-        True,
-        1_234_000_000,
-        "1,234",
-        "millions",
-        999,
-        context,
-    )
-
-    assert result["status"] == "error"
-    assert result["validation_errors"] == [
-        {
-            "field": "page",
-            "message": "page must exist in the report stored in session state",
-        }
-    ]
-    assert NEEDLE_RESULT_STATE_KEY not in context.state
-
-
-def test_submit_needle_stores_ledger_result_in_state() -> None:
-    context = _context()
-
-    result = submit_needle_extraction(
-        True,
-        1_234_000_000,
-        "1,234",
-        "millions",
-        3,
-        context,
-    )
-
-    assert result == {
-        "status": "success",
-        "result": {
-            "found": True,
-            "value": 1_234_000_000.0,
-            "value_verbatim": "1,234",
-            "unit_scale": "millions",
-            "page": 3,
-        },
-    }
-    assert context.state[NEEDLE_RESULT_STATE_KEY] == result["result"]
+    assert recorded["coverage_count"] == len(KPI_KEYS)
+    assert result["status"] == "success"
+    assert result["completion_status"] == "complete"
+    assert context.state[MULTI_KPI_RESULT_STATE_KEY] == result["result"]

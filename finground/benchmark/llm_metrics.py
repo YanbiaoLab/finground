@@ -37,8 +37,7 @@ class LlmCallCounterPlugin(BasePlugin):
     async def before_model_callback(
         self, *, callback_context: CallbackContext, llm_request: LlmRequest
     ) -> LlmResponse | None:
-        if self.max_calls is None or self.count < self.max_calls:
-            self.count += 1
+        self.count += 1
         if (
             self.force_tool_at_call is not None
             and self.count >= self.force_tool_at_call
@@ -101,11 +100,14 @@ class MultiKpiRunMetricsPlugin(BasePlugin):
         tool: BaseTool,
         tool_args: dict[str, Any],
         tool_context: ToolContext,
-        result: dict,
+        result: Any,
     ) -> dict | None:
         del tool_args, tool_context
         tool_name = tool.name
         self.tool_calls[tool_name] += 1
+        if not isinstance(result, dict):
+            self.tool_statuses[f"{tool_name}:completed"] += 1
+            return None
         status = str(result.get("status", "unknown"))
         self.tool_statuses[f"{tool_name}:{status}"] += 1
         if status == "partial_success":

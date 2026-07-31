@@ -1,7 +1,16 @@
 """Public agent factories and shared configuration."""
 
 from finground.agents.common import ADK_MODEL, SETTINGS, create_adk_model
+from finground.agents.kpi_specialists import (
+    COMMON_TASK_AGENT_NAME,
+    KPI_AGENT_SPECS,
+    MULTI_KPI_COORDINATOR_NAME,
+    create_kpi_specialist_agent,
+    kpi_agent_name,
+)
 from finground.agents.multi_kpi import (
+    COMMON_TASK_INSTRUCTION,
+    KPI_AGENT_NAMES,
     KPI_CATALOGUE,
     MULTI_KPI_APP_NAME,
     MULTI_KPI_CONTEXT_WINDOW_TOKENS,
@@ -13,16 +22,22 @@ from finground.agents.multi_kpi import (
     MULTI_KPI_PROMPT_VERSION,
     MULTI_KPI_SEARCH_LIMIT,
     MULTI_KPI_SUBMISSION_DEADLINE,
+    create_common_task_agent,
+    create_kpi_agent_tools,
     create_multi_kpi_agent,
     create_multi_kpi_app,
 )
-from finground.agents.needle import NEEDLE_INSTRUCTION, create_needle_agent
 
 __all__ = [
     "ADK_MODEL",
+    "COMMON_TASK_AGENT_NAME",
+    "COMMON_TASK_INSTRUCTION",
+    "KPI_AGENT_NAMES",
+    "KPI_AGENT_SPECS",
     "KPI_CATALOGUE",
     "MULTI_KPI_APP_NAME",
     "MULTI_KPI_CONTEXT_WINDOW_TOKENS",
+    "MULTI_KPI_COORDINATOR_NAME",
     "MULTI_KPI_FINAL_WARNING_CALL",
     "MULTI_KPI_INSTRUCTION",
     "MULTI_KPI_LLM_CALL_LIMIT",
@@ -31,10 +46,12 @@ __all__ = [
     "MULTI_KPI_PROMPT_VERSION",
     "MULTI_KPI_SEARCH_LIMIT",
     "MULTI_KPI_SUBMISSION_DEADLINE",
-    "NEEDLE_INSTRUCTION",
     "SETTINGS",
     "create_adk_model",
+    "create_common_task_agent",
+    "create_kpi_agent_tools",
+    "create_kpi_specialist_agent",
     "create_multi_kpi_agent",
     "create_multi_kpi_app",
-    "create_needle_agent",
+    "kpi_agent_name",
 ]

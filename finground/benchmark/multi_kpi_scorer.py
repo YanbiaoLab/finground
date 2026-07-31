@@ -8,12 +8,16 @@ import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
 
+import pyarrow.parquet as pq
 from pydantic import ValidationError
 
-from finground.benchmark.parquet import iter_parquet_rows
+from finground.benchmark.kpi_improvement import compare_kpi_quality
+from finground.benchmark.parquet import iter_parquet_rows, parquet_files
 from finground.kpis import KPI_KEYS
 from finground.models import ReportExtraction
 
+MIN_RECALL_EXCLUSIVE = 0.95
+MIN_PRECISION_EXCLUSIVE = 0.98
 GROUND_TRUTH_COLUMNS = (
     "ticker",
     "exchange",
@@ -22,12 +26,21 @@ GROUND_TRUTH_COLUMNS = (
     "year",
     *KPI_KEYS,
 )
+LONG_GROUND_TRUTH_COLUMNS = (
+    "ticker",
+    "exchange",
+    "company_name",
+    "industry",
+    "year",
+    "kpi",
+    "value",
+)
 
 
-def _load_run_scope(output_dir: Path) -> set[str] | None:
+def _load_run_scope(output_dir: Path) -> tuple[set[str] | None, tuple[str, ...]]:
     metadata_path = output_dir / "run_meta.json"
     if not metadata_path.is_file():
-        return None
+        return None, KPI_KEYS
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
@@ -37,7 +50,14 @@ def _load_run_scope(output_dir: Path) -> set[str] | None:
         isinstance(report_id, str) for report_id in report_ids
     ):
         raise ValueError(f"run metadata does not contain a valid report_ids list: {metadata_path}")
-    return set(report_ids)
+    requested_kpis = metadata.get("requested_kpis", list(KPI_KEYS))
+    if (
+        not isinstance(requested_kpis, list)
+        or not requested_kpis
+        or not all(isinstance(kpi, str) and kpi in KPI_KEYS for kpi in requested_kpis)
+    ):
+        raise ValueError(f"run metadata does not contain valid requested_kpis: {metadata_path}")
+    return set(report_ids), tuple(requested_kpis)
 
 
 def _load_predictions(
@@ -92,11 +112,25 @@ def _load_predictions(
 def _load_ground_truth(
     parquet_path: Path,
     allowed_pairs: set[tuple[str, int]],
+    requested_kpis: tuple[str, ...],
 ) -> dict[tuple[str, int, str], dict]:
     ground_truth: dict[tuple[str, int, str], dict] = {}
+    schemas = [set(pq.ParquetFile(path).schema_arrow.names) for path in parquet_files(parquet_path)]
+    wide_columns = {*GROUND_TRUTH_COLUMNS[:5], *requested_kpis}
+    long_columns = set(LONG_GROUND_TRUTH_COLUMNS)
+    if all(wide_columns <= schema for schema in schemas):
+        columns = (*GROUND_TRUTH_COLUMNS[:5], *requested_kpis)
+        long_format = False
+    elif all(long_columns <= schema for schema in schemas):
+        columns = LONG_GROUND_TRUTH_COLUMNS
+        long_format = True
+    else:
+        raise ValueError(
+            "ground-truth Parquet must use LEDGER long schema or contain requested wide KPI columns"
+        )
     for row in iter_parquet_rows(
         parquet_path,
-        GROUND_TRUTH_COLUMNS,
+        columns,
         batch_size=4096,
     ):
         pair = (str(row["ticker"]), int(row["year"]))
@@ -107,7 +141,13 @@ def _load_ground_truth(
             "company_name": str(row["company_name"] or ""),
             "industry": str(row["industry"] or ""),
         }
-        for kpi in KPI_KEYS:
+        if long_format:
+            kpi = str(row["kpi"])
+            value = row["value"]
+            if kpi in requested_kpis and value is not None:
+                ground_truth[(pair[0], pair[1], kpi)] = metadata | {"value": float(value)}
+            continue
+        for kpi in requested_kpis:
             value = row[kpi]
             if value is not None:
                 ground_truth[(pair[0], pair[1], kpi)] = metadata | {"value": float(value)}
@@ -156,7 +196,7 @@ def _metrics(rows: list[dict]) -> dict:
         "missing": missing,
         "extra": extra,
         "recall": matched / ground_truth_total if ground_truth_total else None,
-        "precision": matched / (matched + wrong) if matched + wrong else None,
+        "precision": (matched / (matched + wrong + extra) if matched + wrong + extra else None),
         "median_abs_rel_error": (statistics.median(relative_errors) if relative_errors else None),
     }
 
@@ -200,6 +240,8 @@ def _metrics_table(rows: list[dict], key: str) -> str:
         "precision",
         "median_abs_rel_error",
     ]
+    if any("passed" in row for row in rows):
+        columns.append("passed")
     lines = [
         "| " + " | ".join(columns) + " |",
         "| " + " | ".join("---" for _column in columns) + " |",
@@ -219,6 +261,8 @@ def _render_summary(
     parquet_path: Path,
     tolerance: float,
     aggregations: dict[str, list[dict]],
+    quality_gate: dict,
+    per_kpi_quality_gates: list[dict],
 ) -> str:
     run_counts = Counter(str(run["status"]) for run in runs)
     lines = [
@@ -237,6 +281,18 @@ def _render_summary(
         "| --- | --- |",
     ]
     lines.extend(f"| {key} | {_format_metric(value)} |" for key, value in overall.items())
+    lines.extend(
+        [
+            "",
+            "## Acceptance gate",
+            "",
+            f"- Every requested KPI recall > {quality_gate['min_recall_exclusive']:.0%}",
+            f"- Every requested KPI precision > {quality_gate['min_precision_exclusive']:.0%}",
+            f"- Result: {'PASS' if quality_gate['passed'] else 'FAIL'}",
+            "",
+            _metrics_table(per_kpi_quality_gates, "kpi"),
+        ]
+    )
     for title, key in (
         ("Per KPI", "kpi"),
         ("Per fiscal year", "year"),
@@ -253,23 +309,25 @@ def score_multi_kpi(
     parquet_path: Path,
     tolerance: float = 0.01,
     zero_eps: float = 0.5,
+    prediction_dir_name: str = "raw",
+    baseline_dir: Path | None = None,
 ) -> dict:
     """Score one Multi-KPI run using projected ground-truth columns from Parquet."""
     if min(tolerance, zero_eps) < 0:
         raise ValueError("score tolerances must be non-negative")
-    report_scope = _load_run_scope(output_dir)
-    predictions, runs = _load_predictions(output_dir / "raw", report_scope)
+    report_scope, requested_kpis = _load_run_scope(output_dir)
+    predictions, runs = _load_predictions(output_dir / prediction_dir_name, report_scope)
     allowed_pairs = {
         (str(run["ticker"]), int(run["year"]))
         for run in runs
         if run["ticker"] is not None and run["year"] is not None
     }
-    ground_truth = _load_ground_truth(parquet_path, allowed_pairs)
+    ground_truth = _load_ground_truth(parquet_path, allowed_pairs, requested_kpis)
 
     prediction_index: dict[tuple[str, int, str], dict] = {}
     for prediction in predictions:
         pair = (prediction["ticker"], prediction["year"])
-        if pair in allowed_pairs:
+        if pair in allowed_pairs and prediction["kpi"] in requested_kpis:
             key = (pair[0], pair[1], prediction["kpi"])
             prediction_index.setdefault(key, prediction)
 
@@ -346,6 +404,55 @@ def score_multi_kpi(
         _write_csv(output_dir / filename, aggregated, [key, *metric_fields])
 
     overall = _metrics(rows)
+    per_kpi_metrics = {row["kpi"]: row for row in aggregations["kpi"]}
+    per_kpi_quality_gates = []
+    for kpi in requested_kpis:
+        metrics = per_kpi_metrics.get(kpi, {})
+        recall = metrics.get("recall")
+        precision = metrics.get("precision")
+        per_kpi_quality_gates.append(
+            {
+                "kpi": kpi,
+                **{key: metrics.get(key) for key in metric_fields},
+                "passed": bool(
+                    recall is not None
+                    and precision is not None
+                    and recall > MIN_RECALL_EXCLUSIVE
+                    and precision > MIN_PRECISION_EXCLUSIVE
+                ),
+            }
+        )
+    quality_gate = {
+        "min_recall_exclusive": MIN_RECALL_EXCLUSIVE,
+        "min_precision_exclusive": MIN_PRECISION_EXCLUSIVE,
+        "requested_kpis": list(requested_kpis),
+        "passed": all(item["passed"] for item in per_kpi_quality_gates),
+    }
+    _write_csv(
+        output_dir / "per_kpi_quality_gates.csv",
+        per_kpi_quality_gates,
+        ["kpi", *metric_fields, "passed"],
+    )
+    improvements = (
+        compare_kpi_quality(per_kpi_quality_gates, baseline_dir=baseline_dir)
+        if baseline_dir is not None
+        else []
+    )
+    if improvements:
+        _write_csv(
+            output_dir / "kpi_improvements.csv",
+            improvements,
+            [
+                "kpi",
+                "baseline_recall",
+                "current_recall",
+                "recall_delta",
+                "baseline_precision",
+                "current_precision",
+                "precision_delta",
+                "major_improvement",
+            ],
+        )
     (output_dir / "summary.md").write_text(
         _render_summary(
             overall=overall,
@@ -354,10 +461,42 @@ def score_multi_kpi(
             parquet_path=parquet_path,
             tolerance=tolerance,
             aggregations=aggregations,
+            quality_gate=quality_gate,
+            per_kpi_quality_gates=per_kpi_quality_gates,
         ),
         encoding="utf-8",
     )
     return overall | {
+        "quality_gate": quality_gate,
+        "per_kpi_quality_gates": per_kpi_quality_gates,
+        "improvements": improvements,
+        "commit_recommended_kpis": [row["kpi"] for row in improvements if row["major_improvement"]],
         "reports_scored": len(runs),
         "output_dir": str(output_dir),
     }
+
+
+def score_kpi(
+    *,
+    kpi: str,
+    output_dir: Path,
+    parquet_path: Path,
+    tolerance: float = 0.01,
+    zero_eps: float = 0.5,
+    baseline_dir: Path | None = None,
+) -> dict:
+    """Score a single-specialist run and reject mismatched run metadata."""
+    if kpi not in KPI_KEYS:
+        raise ValueError(f"unknown KPI key: {kpi}")
+    _report_scope, requested_kpis = _load_run_scope(output_dir)
+    if requested_kpis != (kpi,):
+        raise ValueError(
+            f"run requested_kpis is {list(requested_kpis)}, expected exactly [{kpi!r}]"
+        )
+    return score_multi_kpi(
+        output_dir=output_dir,
+        parquet_path=parquet_path,
+        tolerance=tolerance,
+        zero_eps=zero_eps,
+        baseline_dir=baseline_dir,
+    )

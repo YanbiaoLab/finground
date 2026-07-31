@@ -6,13 +6,14 @@ import argparse
 import json
 from pathlib import Path
 
-from finground.benchmark.multi_kpi_runner import run_multi_kpi_sync
-from finground.benchmark.multi_kpi_scorer import score_multi_kpi
-from finground.benchmark.needle_runner import run_needle_sync
-from finground.benchmark.needle_scorer import score_needle
+from finground.benchmark.answer_extractor import extract_output_answers_sync
+from finground.benchmark.multi_kpi_runner import run_kpi_sync, run_multi_kpi_sync
+from finground.benchmark.multi_kpi_scorer import score_kpi, score_multi_kpi
+from finground.kpis import KPI_KEYS
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "ledger"
+DEFAULT_KPI_OUTPUT_ROOT = DEFAULT_OUTPUT_ROOT / "kpi"
 
 
 def _path(value: str) -> Path:
@@ -44,112 +45,102 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="finground")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    needle_parser = commands.add_parser("ledger-needle", help="run ADK single-KPI predictions")
-    needle_parser.add_argument(
-        "--parquet",
-        type=_path,
-        required=True,
-        help="KPI-QA Parquet file or directory of Parquet shards",
-    )
-    needle_parser.add_argument(
-        "--output-dir",
-        type=_path,
-        default=DEFAULT_OUTPUT_ROOT / "needle",
-        help="directory for responses.jsonl and run_meta.json (default: outputs/ledger/needle)",
-    )
-    needle_parser.add_argument(
-        "--limit-queries",
-        type=_non_negative_int,
-        default=None,
-        help="maximum number of queries to process; omit to process all queries",
-    )
-    needle_parser.add_argument(
-        "--concurrency",
-        type=_positive_int,
-        default=4,
-        help="maximum number of concurrent Needle agent runs (default: 4)",
-    )
-    multi_parser = commands.add_parser("ledger-multi", help="run ADK Multi-KPI predictions")
-    multi_parser.add_argument(
-        "--parquet",
-        type=_path,
-        required=True,
-        help="Multi-KPI Parquet file or directory; reads report metadata and mmd_text",
-    )
-    multi_parser.add_argument(
-        "--output-dir",
-        type=_path,
-        default=DEFAULT_OUTPUT_ROOT / "multi",
-        help="directory for raw report JSON and run_meta.json (default: outputs/ledger/multi)",
-    )
-    multi_parser.add_argument(
-        "--limit-reports",
-        type=_non_negative_int,
-        default=None,
-        help="maximum number of reports to process; omit to process all reports",
-    )
-    multi_parser.add_argument(
-        "--reports-file",
-        type=_path,
-        default=None,
-        help="optional text file listing exact report IDs to include, one per line",
-    )
-    multi_parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="skip reports whose existing raw JSON result has status=ok",
-    )
-    multi_parser.add_argument(
-        "--concurrency",
-        type=_positive_int,
-        default=20,
-        help="maximum number of concurrent Multi-KPI agent runs (default: 20)",
-    )
+    def add_run_options(
+        command_parser: argparse.ArgumentParser,
+        *,
+        default_output: Path,
+    ) -> None:
+        command_parser.add_argument(
+            "--parquet",
+            type=_path,
+            required=True,
+            help="Multi-KPI Parquet file or directory; reads report metadata and mmd_text",
+        )
+        command_parser.add_argument(
+            "--output-dir",
+            type=_path,
+            default=default_output,
+            help=f"directory for raw report JSON and run_meta.json (default: {default_output})",
+        )
+        command_parser.add_argument(
+            "--limit-reports",
+            type=_non_negative_int,
+            default=None,
+            help="maximum number of reports to process; omit to process all reports",
+        )
+        command_parser.add_argument(
+            "--reports-file",
+            type=_path,
+            default=None,
+            help="optional text file listing exact report IDs to include, one per line",
+        )
+        command_parser.add_argument(
+            "--resume",
+            action="store_true",
+            help="skip reports whose existing raw JSON result has status=ok",
+        )
+        command_parser.add_argument(
+            "--concurrency",
+            type=_positive_int,
+            default=20,
+            help="maximum number of concurrent Multi-KPI agent runs (default: 20)",
+        )
 
-    score_needle_parser = commands.add_parser(
-        "ledger-score-needle",
-        help="score Needle output against its original KPI-QA Parquet",
+    single_parser = commands.add_parser("ledger-kpi", help="run one ADK KPI specialist")
+    single_parser.add_argument(
+        "--kpi", required=True, choices=KPI_KEYS, help="KPI specialist to test"
     )
-    score_needle_parser.add_argument(
-        "--output-dir",
+    add_run_options(single_parser, default_output=DEFAULT_KPI_OUTPUT_ROOT)
+
+    multi_parser = commands.add_parser("ledger-multi", help="run all 31 KPI specialists")
+    add_run_options(multi_parser, default_output=DEFAULT_OUTPUT_ROOT / "multi")
+
+    score_multi_parser = commands.add_parser(
+        "ledger-score-multi",
+        help="score Multi-KPI output against its original wide Parquet",
+    )
+    score_single_parser = commands.add_parser(
+        "ledger-score-kpi",
+        help="score one KPI specialist against LEDGER Parquet ground truth",
+    )
+    score_single_parser.add_argument(
+        "--kpi", required=True, choices=KPI_KEYS, help="KPI specialist that produced the run"
+    )
+    score_single_parser.add_argument(
+        "--baseline-dir",
         type=_path,
-        required=True,
-        help="ledger-needle output directory containing responses.jsonl",
+        default=None,
+        help="optional previous scored run for per-KPI improvement comparison",
     )
-    score_needle_parser.add_argument(
-        "--parquet",
-        type=_path,
-        required=True,
-        help="original KPI-QA evaluation Parquet file or shard directory",
+    score_single_parser.add_argument(
+        "--output-dir", type=_path, required=True, help="ledger-kpi output directory"
     )
-    score_needle_parser.add_argument(
+    score_single_parser.add_argument(
+        "--parquet", type=_path, required=True, help="original LEDGER evaluation Parquet"
+    )
+    score_single_parser.add_argument(
         "--tolerance",
         type=_non_negative_float,
         default=0.01,
         help="relative tolerance for a matched prediction (default: 0.01)",
     )
-    score_needle_parser.add_argument(
-        "--strict-tolerance",
-        type=_non_negative_float,
-        default=0.0005,
-        help="relative tolerance for strict accuracy (default: 0.0005)",
-    )
-    score_needle_parser.add_argument(
+    score_single_parser.add_argument(
         "--zero-eps",
         type=_non_negative_float,
         default=0.5,
         help="absolute tolerance when ground truth is approximately zero (default: 0.5)",
-    )
-
-    score_multi_parser = commands.add_parser(
-        "ledger-score-multi",
-        help="score Multi-KPI output against its original wide Parquet",
     )
     score_multi_parser.add_argument(
         "--output-dir",
         type=_path,
         required=True,
         help="ledger-multi output directory containing raw report JSON files",
+    )
+    score_multi_parser.add_argument(
+        "--baseline-dir",
+        type=_path,
+        default=None,
+        help="optional previous scored run for per-KPI improvement comparison",
     )
     score_multi_parser.add_argument(
         "--parquet",
@@ -169,48 +160,70 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.5,
         help="absolute tolerance when ground truth is approximately zero (default: 0.5)",
     )
+    score_multi_parser.add_argument(
+        "--llm-extract-answers",
+        action="store_true",
+        help=(
+            "first use an isolated schema-constrained LLM judge to extract LEDGER rows "
+            "from each saved user-visible answer"
+        ),
+    )
+    score_multi_parser.add_argument(
+        "--judge-model",
+        default=None,
+        help="optional model name for --llm-extract-answers (default: FINGROUND_MODEL)",
+    )
     return parser
 
 
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    if args.command == "ledger-needle":
-        result = run_needle_sync(
-            parquet_path=args.parquet,
-            output_dir=args.output_dir,
-            limit_queries=args.limit_queries,
-            concurrency=args.concurrency,
+    if args.command in {"ledger-kpi", "ledger-multi"}:
+        run = run_kpi_sync if args.command == "ledger-kpi" else run_multi_kpi_sync
+        kwargs = {"kpi": args.kpi} if args.command == "ledger-kpi" else {}
+        output_dir = (
+            args.output_dir / args.kpi
+            if args.command == "ledger-kpi" and args.output_dir == DEFAULT_KPI_OUTPUT_ROOT
+            else args.output_dir
         )
-        print(json.dumps(result, indent=2))
-        return
-    if args.command == "ledger-multi":
-        result = run_multi_kpi_sync(
+        result = run(
             parquet_path=args.parquet,
-            output_dir=args.output_dir,
+            output_dir=output_dir,
             limit_reports=args.limit_reports,
             reports_file=args.reports_file,
             resume=args.resume,
             concurrency=args.concurrency,
-        )
-        print(json.dumps(result, indent=2))
-        return
-    if args.command == "ledger-score-needle":
-        result = score_needle(
-            output_dir=args.output_dir,
-            parquet_path=args.parquet,
-            tolerance=args.tolerance,
-            strict_tolerance=args.strict_tolerance,
-            zero_eps=args.zero_eps,
+            **kwargs,
         )
         print(json.dumps(result, indent=2))
         return
     if args.command == "ledger-score-multi":
+        prediction_dir_name = "raw"
+        if args.llm_extract_answers:
+            extract_output_answers_sync(
+                output_dir=args.output_dir,
+                model_name=args.judge_model,
+            )
+            prediction_dir_name = "judged"
         result = score_multi_kpi(
             output_dir=args.output_dir,
             parquet_path=args.parquet,
             tolerance=args.tolerance,
             zero_eps=args.zero_eps,
+            prediction_dir_name=prediction_dir_name,
+            baseline_dir=args.baseline_dir,
+        )
+        print(json.dumps(result, indent=2))
+        return
+    if args.command == "ledger-score-kpi":
+        result = score_kpi(
+            kpi=args.kpi,
+            output_dir=args.output_dir,
+            parquet_path=args.parquet,
+            tolerance=args.tolerance,
+            zero_eps=args.zero_eps,
+            baseline_dir=args.baseline_dir,
         )
         print(json.dumps(result, indent=2))
 

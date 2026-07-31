@@ -1,1 +1,1 @@
-"""FinGround: LEDGER needle and multi-KPI extraction."""
+"""FinGround: agentic LEDGER Multi-KPI extraction."""

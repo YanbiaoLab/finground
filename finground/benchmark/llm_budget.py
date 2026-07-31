@@ -1,4 +1,4 @@
-"""ADK budget reminders for Multi-KPI benchmark invocations."""
+"""ADK routing and budget guardrails for the Multi-KPI agent hierarchy."""
 
 from __future__ import annotations
 
@@ -14,62 +14,32 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
+from finground.agents.kpi_specialists import (
+    COMMON_TASK_AGENT_NAME,
+    KPI_DISPATCH_TOOL_NAME,
+    MULTI_KPI_COORDINATOR_NAME,
+)
 from finground.kpis import KPI_KEYS
-from finground.tools import MULTI_KPI_WORK_RECORD_STATE_KEY, REPORT_STATE_KEY
-from finground.tools.submission import MAX_MULTI_KPI_RECORD_ROWS
+from finground.sec_facts import SEC_FACTS_STATE_KEY
+from finground.tools import (
+    MULTI_KPI_ALLOW_PARTIAL_STATE_KEY,
+    MULTI_KPI_PREPARED_STATE_KEY,
+    MULTI_KPI_REQUESTED_STATE_KEY,
+    MULTI_KPI_WORK_RECORD_STATE_KEY,
+    REPORT_STATE_KEY,
+)
 
 FIRST_REMINDER_RATIO = 0.60
 FINAL_WARNING_RATIO = 0.80
-RETRIEVAL_TOOL_NAMES = {
-    "get_report_info",
-    "read_report_pages",
-    "search_report",
-}
-DEDUPLICATED_TOOL_NAMES = {
-    *RETRIEVAL_TOOL_NAMES,
-    "query_multi_kpi_progress",
-    "record_multi_kpi_progress",
-}
-CLOSURE_TOOL_NAMES = [
-    "record_multi_kpi_progress",
-    "query_multi_kpi_progress",
-    "submit_multi_kpi_extraction",
-]
-RECOVERY_TOOL_NAMES = [
-    "search_report",
-    "record_multi_kpi_progress",
-    "query_multi_kpi_progress",
-]
 
-FIRST_REMINDER = f"""[LLM CALL BUDGET: 60% USED]
-Finish the active source checkpoint now with record_multi_kpi_progress. Record all valid rows in
-batches of at most {MAX_MULTI_KPI_RECORD_ROWS}; a partial_success already saved valid rows, so retry
-only rejected rows. Before any more retrieval, confirm that income, balance sheet, and cash-flow
-batches were all processed. Then query pending_kpis, use grouped note cycles, and move to coverage
-closure. A printed dash/nil is explicit_zero; no matching row after the planned source check is
-absent; relevant but unresolved evidence is ambiguous."""
+FIRST_REMINDER = """[MULTI-AGENT BUDGET: 60% USED]
+Continue delegating only pending KPI specialists. Each specialist must persist exactly one status;
+do not repeat completed specialists or move their evidence into the coordinator context."""
 
-FINAL_WARNING_TEMPLATE = """[LLM CALL BUDGET: 80% USED — CLOSURE ONLY]
-All remaining calls are closure-only: no new retrieval. Record grounded absent or ambiguous
-statuses for remaining pending KPIs in batches of at most {max_rows}, query
-query_multi_kpi_progress(view="kpis"), and submit kpis=[] no later than forced call {max_calls}.
-Do not resend valid rows from partial_success. Do not calculate values or turn missing rows into
-zero."""
-
-
-def _state_backed_submission_args(callback_context: CallbackContext) -> dict:
-    report = callback_context.state.get(REPORT_STATE_KEY, {})
-    work_record = callback_context.state.get(MULTI_KPI_WORK_RECORD_STATE_KEY, {})
-    if not isinstance(report, dict):
-        report = {}
-    if not isinstance(work_record, dict):
-        work_record = {}
-    return {
-        "ticker": report.get("ticker", ""),
-        "reporting_currency": work_record.get("reporting_currency"),
-        "units_note": work_record.get("units_note"),
-        "kpis": [],
-    }
+FINAL_WARNING = """[MULTI-AGENT BUDGET: 80% USED]
+Prioritize pending KPI specialists, accept grounded absent or ambiguous decisions after their
+bounded source checks, then ask manage_report_workflow to audit and finalize the state-backed
+result."""
 
 
 def _restrict_tools(llm_request: LlmRequest, allowed_names: list[str]) -> None:
@@ -87,9 +57,9 @@ def _restrict_tools(llm_request: LlmRequest, allowed_names: list[str]) -> None:
     )
 
 
-def _coverage_from_state(callback_context: CallbackContext) -> tuple[int, list[str]]:
-    report = callback_context.state.get(REPORT_STATE_KEY, {})
-    work_record = callback_context.state.get(MULTI_KPI_WORK_RECORD_STATE_KEY, {})
+def _coverage_from_state(context: CallbackContext | ToolContext) -> tuple[int, list[str]]:
+    report = context.state.get(REPORT_STATE_KEY, {})
+    work_record = context.state.get(MULTI_KPI_WORK_RECORD_STATE_KEY, {})
     report_year = report.get("year") if isinstance(report, dict) else None
     rows = work_record.get("kpis", []) if isinstance(work_record, dict) else []
     covered = {
@@ -97,182 +67,127 @@ def _coverage_from_state(callback_context: CallbackContext) -> tuple[int, list[s
         for row in rows
         if isinstance(row, dict) and row.get("fiscal_year") == report_year
     }
-    pending = [kpi for kpi in KPI_KEYS if kpi not in covered]
+    sec_facts = context.state.get(SEC_FACTS_STATE_KEY, {})
+    structured_values = sec_facts.get("values", {}) if isinstance(sec_facts, dict) else {}
+    if isinstance(structured_values, dict):
+        covered.update(kpi for kpi in structured_values if kpi in KPI_KEYS)
+    requested = context.state.get(MULTI_KPI_REQUESTED_STATE_KEY)
+    scope = (
+        [kpi for kpi in KPI_KEYS if kpi in requested]
+        if isinstance(requested, list) and requested
+        else list(KPI_KEYS)
+    )
+    pending = [kpi for kpi in scope if kpi not in covered]
     return len(covered), pending
 
 
-class MultiKpiExecutionGuardPlugin(BasePlugin):
-    """Keep Multi-KPI work inside one invocation and enforce budget reminders."""
+def _agent_name(context: CallbackContext | ToolContext | None) -> str | None:
+    return getattr(context, "agent_name", None) if context is not None else None
 
-    def __init__(self, *, max_calls: int, max_searches: int = 7) -> None:
+
+class MultiKpiExecutionGuardPlugin(BasePlugin):
+    """Route the coordinator while leaving each isolated specialist autonomous."""
+
+    def __init__(self, *, max_calls: int) -> None:
         if max_calls < 1:
             raise ValueError("max_calls must be at least 1")
-        if max_searches < 1:
-            raise ValueError("max_searches must be at least 1")
         super().__init__(name="finground_multi_kpi_execution_guard")
         self.max_calls = max_calls
-        self.max_searches = max_searches
         self.call_count = 0
         self.prevented_early_stops = 0
         self.first_reminder_call = math.ceil(max_calls * FIRST_REMINDER_RATIO)
         self.final_warning_call = math.ceil(max_calls * FINAL_WARNING_RATIO)
-        self._report_info_done = False
-        self._awaiting_checkpoint_pages: list[int] = []
-        self._search_requires_read = False
-        self._coverage_count = 0
-        self._retrieval_coverage: dict[str, int] = {}
-        self._repair_queue: list[dict[str, Any]] = []
-        self._repair_attempts: dict[str, int] = {}
-        self._deferred_repairs: list[dict[str, Any]] = []
-        self._duplicate_recovery = False
-        self._blocked_tool_name: str | None = None
-        self._search_count = 0
+        self._first_reminder_sent = False
+        self._final_warning_sent = False
 
     @staticmethod
-    def _retrieval_signature(tool_name: str, tool_args: dict[str, Any]) -> str:
-        return f"{tool_name}:{json.dumps(tool_args, sort_keys=True, default=str)}"
+    def _prepared(context: CallbackContext | ToolContext) -> bool:
+        return isinstance(context.state.get(MULTI_KPI_PREPARED_STATE_KEY), dict)
 
-    def _workflow_phase(
-        self, callback_context: CallbackContext
-    ) -> tuple[str, list[str] | None, list[str]]:
-        coverage_count, pending_kpis = _coverage_from_state(callback_context)
-        self._coverage_count = max(self._coverage_count, coverage_count)
-        if not pending_kpis:
-            return "submit", ["submit_multi_kpi_extraction"], pending_kpis
-        if self.call_count >= self.final_warning_call:
-            return "closure", CLOSURE_TOOL_NAMES, pending_kpis
-        if not self._report_info_done:
-            return "metadata", ["get_report_info"], pending_kpis
-        if self._duplicate_recovery:
-            recovery_tools = [
-                name for name in RECOVERY_TOOL_NAMES if name != self._blocked_tool_name
-            ]
-            return "duplicate_recovery", recovery_tools, pending_kpis
-        if self._awaiting_checkpoint_pages:
-            return (
-                "repair" if self._repair_queue else "checkpoint",
-                ["record_multi_kpi_progress"],
-                pending_kpis,
-            )
-        if self._search_requires_read:
-            return "source_read", ["read_report_pages"], pending_kpis
-        if self._deferred_repairs:
-            return "repair_exhausted", RECOVERY_TOOL_NAMES, pending_kpis
-        return "discovery", None, pending_kpis
-
-    def _workflow_message(
+    def _allowed_coordinator_tools(
         self,
         callback_context: CallbackContext,
-        phase: str,
+        pending_kpis: list[str],
+    ) -> list[str]:
+        if self.call_count >= self.max_calls:
+            callback_context.state[MULTI_KPI_ALLOW_PARTIAL_STATE_KEY] = True
+            return [COMMON_TASK_AGENT_NAME]
+        if not self._prepared(callback_context):
+            return [COMMON_TASK_AGENT_NAME]
+        if pending_kpis:
+            return [KPI_DISPATCH_TOOL_NAME]
+        return [COMMON_TASK_AGENT_NAME]
+
+    def _routing_message(
+        self,
+        callback_context: CallbackContext,
         pending_kpis: list[str],
     ) -> str:
         report = callback_context.state.get(REPORT_STATE_KEY, {})
         report_id = report.get("report_id") if isinstance(report, dict) else None
-        details = [
-            "[WORKFLOW STATE — AUTHORITATIVE]",
-            f"call={self.call_count}/{self.max_calls}; phase={phase}; report={report_id}; "
-            f"coverage={len(KPI_KEYS) - len(pending_kpis)}/{len(KPI_KEYS)}",
-            f"pending_kpis={json.dumps(pending_kpis)}",
-        ]
-        if self._awaiting_checkpoint_pages:
-            details.append(
-                f"active_source_pages={json.dumps(self._awaiting_checkpoint_pages)}; "
-                "next_action=record_multi_kpi_progress"
-            )
-        if self._repair_queue:
-            details.append(
-                "repair_queue="
-                f"{json.dumps(self._repair_queue, ensure_ascii=True, separators=(',', ':'))}; "
-                "resubmit only these rejected KPI rows"
-            )
-        if self._deferred_repairs:
-            details.append(
-                "repair_exhausted="
-                f"{json.dumps(self._deferred_repairs, ensure_ascii=True, separators=(',', ':'))}; "
-                "do not retry the same evidence again; choose a new source or record ambiguous "
-                "after the bounded source check"
-            )
-        if phase == "source_read":
-            details.append("next_action=read_report_pages using the current search results")
-        elif phase == "closure":
-            details.append(
-                "retrieval is disabled; close pending coverage in batches, query once, then submit"
-            )
-        elif phase == "submit":
-            details.append("coverage is complete; submit kpis=[] now")
-        return "\n".join(details)
+        return "\n".join(
+            [
+                "[COORDINATOR ROUTING STATE — AUTHORITATIVE]",
+                f"total_model_calls={self.call_count}/{self.max_calls}; report={report_id}; "
+                f"prepared={self._prepared(callback_context)}; "
+                f"coverage={len(KPI_KEYS) - len(pending_kpis)}/{len(KPI_KEYS)}",
+                f"pending_kpis={json.dumps(pending_kpis)}",
+                (
+                    f"next_action={COMMON_TASK_AGENT_NAME} finalize available state"
+                    if self.call_count >= self.max_calls
+                    else (
+                        f"next_action={COMMON_TASK_AGENT_NAME} prepare"
+                        if not self._prepared(callback_context)
+                        else (
+                            f"next_action={COMMON_TASK_AGENT_NAME} finalize"
+                            if not pending_kpis
+                            else "next_action=delegate one pending KPI specialist"
+                        )
+                    )
+                ),
+            ]
+        )
 
     async def before_model_callback(
-        self, *, callback_context: CallbackContext, llm_request: LlmRequest
+        self,
+        *,
+        callback_context: CallbackContext,
+        llm_request: LlmRequest,
     ) -> LlmResponse | None:
         self.call_count += 1
-        if callback_context is not None:
-            phase, allowed_names, pending_kpis = self._workflow_phase(callback_context)
-            if allowed_names is not None:
-                _restrict_tools(llm_request, allowed_names)
+        if callback_context is None or _agent_name(callback_context) != MULTI_KPI_COORDINATOR_NAME:
+            return None
+
+        _coverage_count, pending_kpis = _coverage_from_state(callback_context)
+        _restrict_tools(
+            llm_request,
+            self._allowed_coordinator_tools(callback_context, pending_kpis),
+        )
+        llm_request.contents.append(
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(text=self._routing_message(callback_context, pending_kpis))
+                ],
+            )
+        )
+        if self.call_count >= self.first_reminder_call and not self._first_reminder_sent:
+            self._first_reminder_sent = True
             llm_request.contents.append(
                 types.Content(
                     role="user",
-                    parts=[
-                        types.Part.from_text(
-                            text=self._workflow_message(
-                                callback_context,
-                                phase,
-                                pending_kpis,
-                            )
-                        )
-                    ],
+                    parts=[types.Part.from_text(text=FIRST_REMINDER)],
                 )
             )
-        message = None
-        if self.call_count == self.first_reminder_call:
-            message = FIRST_REMINDER
-        elif self.call_count == self.final_warning_call:
-            message = FINAL_WARNING_TEMPLATE.format(
-                max_rows=MAX_MULTI_KPI_RECORD_ROWS,
-                max_calls=self.max_calls,
-            )
-        if message is not None:
+        if self.call_count >= self.final_warning_call and not self._final_warning_sent:
+            self._final_warning_sent = True
             llm_request.contents.append(
                 types.Content(
                     role="user",
-                    parts=[types.Part.from_text(text=message)],
-                )
-            )
-        if self.call_count >= self.max_calls:
-            submit_args = json.dumps(
-                _state_backed_submission_args(callback_context),
-                ensure_ascii=True,
-            )
-            llm_request.contents.append(
-                types.Content(
-                    role="user",
-                    parts=[
-                        types.Part.from_text(
-                            text=(
-                                "[FINAL CALL] Call submit_multi_kpi_extraction now with exactly "
-                                f"these arguments: {submit_args}"
-                            )
-                        )
-                    ],
+                    parts=[types.Part.from_text(text=FINAL_WARNING)],
                 )
             )
         return None
-
-    def _track_repair_queue(self, result: dict) -> None:
-        repair_queue = result.get("repair_queue")
-        if not isinstance(repair_queue, list) or not repair_queue:
-            self._repair_queue = []
-            return
-        signature = json.dumps(repair_queue, sort_keys=True, default=str)
-        attempts = self._repair_attempts.get(signature, 0) + 1
-        self._repair_attempts[signature] = attempts
-        if attempts >= 2:
-            self._deferred_repairs = repair_queue
-            self._repair_queue = []
-            self._awaiting_checkpoint_pages = []
-        else:
-            self._repair_queue = repair_queue
 
     async def before_tool_callback(
         self,
@@ -281,149 +196,61 @@ class MultiKpiExecutionGuardPlugin(BasePlugin):
         tool_args: dict[str, Any],
         tool_context: ToolContext,
     ) -> dict | None:
-        tool_name = tool.name
-        if tool_name == "search_report" and self._search_count >= self.max_searches:
-            self._duplicate_recovery = True
-            self._blocked_tool_name = tool_name
-            return {
-                "status": "error",
-                "retryable": False,
-                "error": "search budget exhausted",
-                "blocked_tool": tool_name,
-                "search_count": self._search_count,
-                "next_action": "query progress or record grounded coverage",
-            }
-        if tool_name == "get_report_info" and self._report_info_done:
-            return {
-                "status": "error",
-                "retryable": True,
-                "error": "duplicate retrieval blocked",
-                "blocked_tool": tool_name,
-                "next_action": (
-                    "record_multi_kpi_progress"
-                    if self._awaiting_checkpoint_pages
-                    else "continue from the existing report metadata"
-                ),
-            }
-        if tool_name in DEDUPLICATED_TOOL_NAMES:
-            signature = self._retrieval_signature(tool_name, tool_args)
-            previous_coverage = self._retrieval_coverage.get(signature)
-            if previous_coverage is not None and previous_coverage >= self._coverage_count:
-                self._duplicate_recovery = True
-                self._blocked_tool_name = tool_name
-                if tool_name == "read_report_pages":
-                    self._search_requires_read = False
-                elif tool_name == "record_multi_kpi_progress":
-                    self._awaiting_checkpoint_pages = []
-                    self._repair_queue = []
+        agent_name = _agent_name(tool_context)
+        if agent_name == MULTI_KPI_COORDINATOR_NAME and tool.name == KPI_DISPATCH_TOOL_NAME:
+            if not self._prepared(tool_context):
                 return {
                     "status": "error",
                     "retryable": True,
-                    "error": (
-                        "duplicate retrieval blocked"
-                        if tool_name in RETRIEVAL_TOOL_NAMES
-                        else "duplicate progress action blocked"
-                    ),
-                    "blocked_tool": tool_name,
-                    "next_action": (
-                        "record_multi_kpi_progress"
-                        if self._awaiting_checkpoint_pages
-                        else "choose a new source or query_multi_kpi_progress"
-                    ),
+                    "error": "report preparation is required before KPI delegation",
+                    "next_action": COMMON_TASK_AGENT_NAME,
                 }
-        if tool_name in RETRIEVAL_TOOL_NAMES:
-            if self.call_count >= self.final_warning_call:
+            _coverage_count, pending_kpis = _coverage_from_state(tool_context)
+            requested = tool_args.get("kpis")
+            invalid = (
+                not isinstance(requested, list)
+                or not requested
+                or any(kpi not in pending_kpis for kpi in requested)
+            )
+            if invalid:
                 return {
                     "status": "error",
                     "retryable": True,
-                    "error": "retrieval disabled during closure",
-                    "blocked_tool": tool_name,
-                    "next_action": "record pending coverage, query progress, then submit",
+                    "error": "dispatcher kpis must be the currently pending canonical KPI keys",
+                    "pending_kpis": pending_kpis,
                 }
-            if self._awaiting_checkpoint_pages:
-                return {
-                    "status": "error",
-                    "retryable": True,
-                    "error": "active retrieval requires checkpoint",
-                    "blocked_tool": tool_name,
-                    "active_source_pages": self._awaiting_checkpoint_pages,
-                    "next_action": "record_multi_kpi_progress",
-                }
-        return None
-
-    async def after_tool_callback(
-        self,
-        *,
-        tool: BaseTool,
-        tool_args: dict[str, Any],
-        tool_context: ToolContext,
-        result: dict,
-    ) -> dict | None:
-        del tool_context
-        tool_name = tool.name
-        status = result.get("status")
-        if status not in {"success", "partial_success"}:
-            if tool_name == "record_multi_kpi_progress":
-                self._track_repair_queue(result)
-            return None
-
-        coverage_count = result.get("coverage_count")
-        previous_coverage_count = self._coverage_count
-        if isinstance(coverage_count, int):
-            self._coverage_count = max(self._coverage_count, coverage_count)
-        if tool_name == "get_report_info":
-            self._report_info_done = True
-        elif tool_name == "search_report":
-            self._search_count += 1
-            signature = self._retrieval_signature(tool_name, tool_args)
-            self._retrieval_coverage[signature] = self._coverage_count
-            self._search_requires_read = bool(result.get("results"))
-            self._duplicate_recovery = False
-            self._blocked_tool_name = None
-        elif tool_name == "read_report_pages":
-            signature = self._retrieval_signature(tool_name, tool_args)
-            self._retrieval_coverage[signature] = self._coverage_count
-            pages = result.get("pages")
-            self._awaiting_checkpoint_pages = [
-                int(page["page"])
-                for page in pages or []
-                if isinstance(page, dict) and isinstance(page.get("page"), int)
-            ]
-            self._search_requires_read = False
-            self._deferred_repairs = []
-            self._duplicate_recovery = False
-            self._blocked_tool_name = None
-        elif tool_name == "record_multi_kpi_progress":
-            signature = self._retrieval_signature(tool_name, tool_args)
-            self._retrieval_coverage[signature] = self._coverage_count
-            self._track_repair_queue(result)
-            if not self._repair_queue:
-                self._awaiting_checkpoint_pages = []
-            if self._coverage_count > previous_coverage_count:
-                self._duplicate_recovery = False
-                self._blocked_tool_name = None
-        elif tool_name == "query_multi_kpi_progress":
-            signature = self._retrieval_signature(tool_name, tool_args)
-            self._retrieval_coverage[signature] = self._coverage_count
         return None
 
     async def after_model_callback(
-        self, *, callback_context: CallbackContext, llm_response: LlmResponse
+        self,
+        *,
+        callback_context: CallbackContext,
+        llm_response: LlmResponse,
     ) -> LlmResponse | None:
-        """Replace a premature non-tool answer with a safe state-backed tool call."""
+        """Replace a premature coordinator answer with a state-backed delegation."""
         if (
-            llm_response.get_function_calls()
+            _agent_name(callback_context) != MULTI_KPI_COORDINATOR_NAME
+            or llm_response.get_function_calls()
             or llm_response.error_code is not None
             or llm_response.interrupted
             or llm_response.partial
         ):
             return None
-        self.prevented_early_stops += 1
-        tool_name = "query_multi_kpi_progress"
-        tool_args: dict = {"view": "kpis"}
+
+        _coverage_count, pending_kpis = _coverage_from_state(callback_context)
         if self.call_count >= self.max_calls:
-            tool_name = "submit_multi_kpi_extraction"
-            tool_args = _state_backed_submission_args(callback_context)
+            callback_context.state[MULTI_KPI_ALLOW_PARTIAL_STATE_KEY] = True
+        if not self._prepared(callback_context):
+            tool_name = COMMON_TASK_AGENT_NAME
+            request = "Prepare report metadata and primary-statement source indexes."
+        elif pending_kpis and self.call_count < self.max_calls:
+            tool_name = KPI_DISPATCH_TOOL_NAME
+            request = "Find, validate, and checkpoint every supplied pending KPI."
+        else:
+            tool_name = COMMON_TASK_AGENT_NAME
+            request = "Finalize and submit the state-backed extraction."
+
+        self.prevented_early_stops += 1
         guarded_response = llm_response.model_copy(deep=True)
         guarded_response.content = types.Content(
             role="model",
@@ -431,7 +258,11 @@ class MultiKpiExecutionGuardPlugin(BasePlugin):
                 types.Part(
                     function_call=types.FunctionCall(
                         name=tool_name,
-                        args=tool_args,
+                        args=(
+                            {"kpis": pending_kpis, "request": request}
+                            if tool_name == KPI_DISPATCH_TOOL_NAME
+                            else {"request": request}
+                        ),
                     )
                 )
             ],

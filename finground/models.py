@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -257,57 +256,3 @@ class MultiKpiWorkRecord(BaseModel):
     kpis: list[MultiKpiEvidence] = Field(default_factory=list)
 
     notes: list[MultiKpiNote] = Field(default_factory=list, max_length=200)
-
-
-class NeedleAnswer(BaseModel):
-    """LEDGER-compatible answer for one company/year/KPI query."""
-
-    found: bool
-    value: float | None = None
-    value_verbatim: str | None = None
-    unit_scale: UnitScale | None = None
-    page: int | None = Field(default=None, ge=1)
-
-    @field_validator("unit_scale", mode="before")
-    @classmethod
-    def normalize_unit_scale(cls, value: object) -> object:
-        if value is None:
-            return None
-        if isinstance(value, (int, float)):
-            return {
-                1: "units",
-                1_000: "thousands",
-                1_000_000: "millions",
-                1_000_000_000: "billions",
-            }.get(value, "unknown")
-        normalized = str(value).strip().lower().replace("-", "_")
-        for token, scale in (
-            ("currency_subunits_per_share", "currency_subunits_per_share"),
-            ("cents per share", "currency_subunits_per_share"),
-            ("pence per share", "currency_subunits_per_share"),
-            ("per_share", "per_share"),
-            ("per share", "per_share"),
-            ("billion", "billions"),
-            ("million", "millions"),
-            ("thousand", "thousands"),
-            ("unit", "units"),
-        ):
-            if token in normalized:
-                return scale
-        return "unknown"
-
-    @field_validator("page", mode="before")
-    @classmethod
-    def normalize_page(cls, value: object) -> object:
-        if value is None or isinstance(value, int):
-            return value
-        match = re.search(r"\d+", str(value))
-        return int(match.group()) if match else value
-
-    @model_validator(mode="after")
-    def validate_presence(self) -> NeedleAnswer:
-        if self.found and (self.value is None or self.value_verbatim is None):
-            raise ValueError("found answers require value and value_verbatim")
-        if not self.found and self.value is not None:
-            raise ValueError("not-found answers must have a null value")
-        return self

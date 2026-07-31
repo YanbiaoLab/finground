@@ -1,12 +1,23 @@
 import ast
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 from google.adk.models.lite_llm import LiteLlm
+from google.adk.tools import AgentTool
 
 import finground.agents as agents_package
 from finground.agents.common import create_adk_model
+from finground.agents.kpi_specialists import (
+    COMMON_TASK_AGENT_NAME,
+    KPI_AGENT_SPECS,
+    KPI_DISPATCH_TOOL_NAME,
+    MULTI_KPI_COORDINATOR_NAME,
+    KpiSpecialistTool,
+    kpi_agent_name,
+)
 from finground.agents.multi_kpi import (
+    KPI_AGENT_NAMES,
     MULTI_KPI_CONTEXT_WINDOW_TOKENS,
     MULTI_KPI_FINAL_WARNING_CALL,
     MULTI_KPI_LLM_CALL_LIMIT,
@@ -16,9 +27,10 @@ from finground.agents.multi_kpi import (
     MULTI_KPI_SUBMISSION_DEADLINE,
     create_multi_kpi_agent,
     create_multi_kpi_app,
+    resolve_requested_kpis,
 )
-from finground.agents.needle import create_needle_agent
 from finground.config import load_settings
+from finground.kpis import KPI_KEYS
 
 
 def test_agent_core_does_not_import_benchmark_package() -> None:
@@ -96,68 +108,108 @@ def test_qwen_vllm_json_output_uses_json_object_mode() -> None:
     assert isinstance(model, LiteLlm)
     assert model.model == "openai/qwen-local"
     assert model._additional_args["response_format"] == {"type": "json_object"}
+    assert "tool_choice" not in model._additional_args
 
 
-def test_needle_agent_exposes_state_and_submission_tools() -> None:
-    agent = create_needle_agent()
-
-    assert {tool.__name__ for tool in agent.tools} == {
-        "get_report_info",
-        "read_report_pages",
-        "search_report",
-        "submit_needle_extraction",
-    }
-    assert "correct every" in agent.instruction
-
-
-def test_multi_kpi_agent_exposes_state_and_submission_tools() -> None:
+def test_multi_kpi_agent_exposes_one_compact_dispatcher_and_one_common_agent() -> None:
     agent = create_multi_kpi_agent()
 
-    tool_names = {getattr(tool, "name", None) or tool.__name__ for tool in agent.tools}
-    assert tool_names == {
-        "get_report_info",
-        "query_multi_kpi_progress",
-        "read_report_pages",
-        "record_multi_kpi_progress",
-        "search_report",
-        "submit_multi_kpi_extraction",
-    }
-    assert "correct every" in agent.instruction
-    assert MULTI_KPI_LLM_CALL_LIMIT == 50
-    assert MULTI_KPI_PROGRESS_REMINDER_CALL == 30
-    assert MULTI_KPI_SEARCH_LIMIT == 7
-    assert MULTI_KPI_FINAL_WARNING_CALL == 40
-    assert MULTI_KPI_SUBMISSION_DEADLINE == 50
-    assert "Balance evidence-supported recall and precision" in agent.instruction
-    assert "Missing means omitting" in agent.instruction
-    assert "report fiscal year" in agent.instruction
-    assert "8 KPI rows per record call" in agent.instruction
-    assert "Do not let one rejected row block the next primary statement" in agent.instruction
-    assert "normal submission by call 35" in agent.instruction
-    assert "Calls 40-49 are closure-only" in agent.instruction
-    assert "same statement" in agent.instruction
-    assert "single-KPI fallback" in agent.instruction
-    assert "coverage for all 31 KPI keys" in agent.instruction
+    assert agent.name == MULTI_KPI_COORDINATOR_NAME
+    assert agent.description == (
+        "Coordinates context-isolated specialists to complete a structured extraction workflow."
+    )
+    assert len(agent.tools) == 2
+    assert isinstance(agent.tools[0], AgentTool)
+    assert isinstance(agent.tools[1], KpiSpecialistTool)
+    declaration = agent.tools[1]._get_declaration()
+    assert declaration.name == KPI_DISPATCH_TOOL_NAME
+    assert declaration.parameters_json_schema["properties"]["kpis"]["items"]["enum"] == list(
+        KPI_KEYS
+    )
+    assert [tool.name for tool in agent.tools] == [
+        COMMON_TASK_AGENT_NAME,
+        KPI_DISPATCH_TOOL_NAME,
+    ]
+    root_tool_declarations = [
+        tool._get_declaration().model_dump(mode="json", exclude_none=True) for tool in agent.tools
+    ]
+    serialized_root_tools = json.dumps(
+        root_tool_declarations,
+        separators=(",", ":"),
+    )
+    assert len(serialized_root_tools) <= 2_000
+    assert "Source priority" not in serialized_root_tools
+    assert "Reject:" not in serialized_root_tools
+    assert tuple(kpi_agent_name(kpi) for kpi in KPI_KEYS) == KPI_AGENT_NAMES
+    assert tuple(KPI_AGENT_SPECS) == KPI_KEYS
+    assert "Do not inspect report text" in agent.instruction
+    assert "Context isolation is intentional" in agent.instruction
     assert MULTI_KPI_MAX_OUTPUT_TOKENS == 4_096
     assert agent.generate_content_config.max_output_tokens == 4_096
     function_config = agent.generate_content_config.tool_config.function_calling_config
     assert function_config.mode == "ANY"
-    record_tool = next(
-        tool for tool in agent.tools if getattr(tool, "name", None) == "record_multi_kpi_progress"
-    )
-    evidence_schema = record_tool._get_declaration().parameters_json_schema["properties"]["kpis"][
-        "items"
+
+    common_agent = agent.tools[0].agent
+    assert common_agent.include_contents == "none"
+    assert "never decides an individual KPI value" in common_agent.description
+    assert {tool.__name__ for tool in common_agent.tools} == {
+        "prepare_multi_kpi_report",
+        "query_multi_kpi_progress",
+        "finalize_multi_kpi_report",
+    }
+
+    dispatcher = agent.tools[1]
+    assert tuple(dispatcher._specialists) == KPI_KEYS
+    for kpi, agent_tool in dispatcher._specialists.items():
+        specialist = agent_tool.agent
+        assert specialist.name == kpi_agent_name(kpi)
+        assert specialist.include_contents == "none"
+        assert f"only {kpi}" in specialist.description
+        assert KPI_AGENT_SPECS[kpi].source_priority in specialist.description
+        assert f"exactly one canonical KPI: {kpi}" in specialist.instruction
+        assert "Do not find, judge, or record any other KPI" in specialist.instruction
+        specialist_tool_names = {
+            getattr(tool, "name", None) or tool.__name__ for tool in specialist.tools
+        }
+        assert specialist_tool_names == {
+            f"find_{kpi}_candidates",
+            "search_report",
+            "read_report_pages",
+            "record_multi_kpi_progress",
+        }
+        record_tool = next(
+            tool
+            for tool in specialist.tools
+            if getattr(tool, "name", None) == "record_multi_kpi_progress"
+        )
+        evidence_schema = record_tool._get_declaration().parameters_json_schema["properties"][
+            "kpis"
+        ]["items"]
+        assert evidence_schema["properties"]["kpi"]["enum"] == [kpi]
+        assert evidence_schema["properties"]["status"]["enum"] == [
+            "found",
+            "explicit_zero",
+            "absent",
+            "ambiguous",
+        ]
+        assert "value" not in evidence_schema["properties"]
+
+
+def test_multi_kpi_budget_matches_multi_agent_topology() -> None:
+    assert MULTI_KPI_LLM_CALL_LIMIT == 200
+    assert MULTI_KPI_PROGRESS_REMINDER_CALL == 120
+    assert MULTI_KPI_SEARCH_LIMIT == 2
+    assert MULTI_KPI_FINAL_WARNING_CALL == 160
+    assert MULTI_KPI_SUBMISSION_DEADLINE == 200
+
+
+def test_requested_kpi_scope_supports_single_multiple_and_all() -> None:
+    assert resolve_requested_kpis("Find revenue") == ["revenue"]
+    assert resolve_requested_kpis("Find net income and capital expenditures") == [
+        "net_income",
+        "capex",
     ]
-    assert evidence_schema["properties"]["status"]["enum"] == [
-        "found",
-        "explicit_zero",
-        "absent",
-        "ambiguous",
-    ]
-    assert "value" not in evidence_schema["properties"]
-    assert (
-        record_tool._get_declaration().parameters_json_schema["properties"]["kpis"]["maxItems"] == 8
-    )
+    assert resolve_requested_kpis("Extract all 31 KPIs") == list(KPI_KEYS)
 
 
 def test_multi_kpi_app_uses_deterministic_context_filter_without_llm_compaction() -> None:

@@ -2,7 +2,6 @@
 name = "finground"
 version = "0.1.0"
 description = "Agentic retrieval and structured extraction of financial documents"
-readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "google-adk>=1.0,<2",
