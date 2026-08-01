@@ -29,7 +29,7 @@ from finground.tools.structured import JsonSchemaFunctionTool
 
 KPI_AGENT_NAME_PREFIX = "extract_"
 KPI_SPECIALIST_SEARCH_LIMIT = 2
-KPI_SPECIALIST_MODEL_TURN_LIMIT = 6
+KPI_SPECIALIST_MODEL_TURN_LIMIT = 8
 
 
 def kpi_agent_name(kpi: str) -> str:

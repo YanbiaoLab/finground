@@ -29,7 +29,7 @@ from finground.tools import (
     search_report,
     submit_multi_kpi_extraction,
 )
-from finground.tools.submission import _semantic_row_error
+from finground.tools.submission import _line_contains_number, _semantic_row_error
 
 REPORT = Path(__file__).parent / "fixtures" / "ledger" / "report.mmd"
 
@@ -88,6 +88,14 @@ def test_revenue_semantics_accepts_printed_mortgage_reit_aggregates(label: str) 
 @pytest.mark.parametrize("label", ("Interest income", "Net interest income", "Net income"))
 def test_revenue_semantics_rejects_reit_components_and_bottom_line(label: str) -> None:
     assert _semantic_row_error("revenue", label, "found") is not None
+
+
+def test_number_evidence_accepts_markdown_heading_and_adjacent_sentence() -> None:
+    assert _line_contains_number(
+        "## Debt maturities\n\nOur long-term debt matures as follows: $440 million in 2018.",
+        "Debt maturities",
+        "440",
+    )
 
 
 def test_capex_semantics_accepts_property_additions_on_cash_flow_statement() -> None:
@@ -259,6 +267,36 @@ def test_prepare_report_keeps_full_pages_out_of_common_agent_result() -> None:
     assert prepare_multi_kpi_report(context)["reused"] is True
 
 
+def test_prepare_report_inherits_all_monetary_values_document_unit() -> None:
+    report = Report(
+        "NYSE_ACME_2023",
+        "NYSE",
+        "ACME",
+        2023,
+        """\
+All monetary values, other than per share amounts, are stated in millions of U.S. dollars unless otherwise specified.
+<--- Page Split --->
+## Consolidated balance sheets
+<table><tr><td></td><td>2023</td></tr>
+<tr><td>Current portion of long-term debt</td><td>162</td></tr></table>
+""",
+    )
+    context = SimpleNamespace(
+        state={"report": build_report_state(report)},
+        actions=SimpleNamespace(skip_summarization=None),
+    )
+
+    prepare_multi_kpi_report(context)
+    result = find_kpi_source_candidates("long_term_debt_current", context)
+
+    candidate = next(
+        item for item in result["candidates"] if "current portion" in item["row_label"].lower()
+    )
+    assert candidate["unit_text"].startswith("All monetary values")
+    assert candidate["unit_page"] == 1
+    assert candidate["unit_scope"] == "document"
+
+
 def test_prepare_structured_facts_finalize_without_specialist_rows(
     monkeypatch,
 ) -> None:
@@ -387,6 +425,41 @@ For the years ended December 31, 2023 and 2022
     )
     assert recorded["status"] == "success"
     assert context.state[MULTI_KPI_WORK_RECORD_STATE_KEY]["kpis"][0]["value"] == 6_980_000
+
+
+def test_record_multi_kpi_progress_rejects_source_id_for_different_number() -> None:
+    context = _context()
+    page = read_report_pages([3], ["Revenue"], context)
+    revenue = next(
+        cell for cell in page["pages"][0]["source_cells"] if cell["row_label"] == "Revenue"
+    )
+
+    result = record_multi_kpi_progress(
+        "USD",
+        None,
+        [
+            {
+                "kpi": "revenue",
+                "fiscal_year": 2023,
+                "status": "found",
+                "value_verbatim": "999",
+                "source_id": revenue["source_id"],
+            }
+        ],
+        [],
+        context,
+    )
+
+    assert result["status"] == "partial_success"
+    assert result["validation_errors"] == [
+        {
+            "field": "kpis.0.source_id",
+            "message": (
+                "source_id points to a different printed number; omit source_id for prose "
+                "evidence or use the matching source cell"
+            ),
+        }
+    ]
 
 
 def test_statement_classifier_includes_adjacent_continuation_page() -> None:

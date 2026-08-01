@@ -115,6 +115,9 @@ KPI_ALIASES: dict[str, tuple[str, ...]] = {
         "current portion of long term debt",
         "current maturities of long term debt",
         "current maturities of notes payable",
+        "current notes payable",
+        "note payable current portion",
+        "less current portion of notes payable",
         "current debt",
     ),
     "short_term_borrowings": (

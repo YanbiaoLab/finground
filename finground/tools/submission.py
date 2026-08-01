@@ -392,6 +392,20 @@ def _line_contains_number(page_text: str, line_label: str, value_verbatim: str) 
                 continue
             if math.isclose(observed, expected, rel_tol=1e-12, abs_tol=1e-12):
                 return True
+    for index, line in enumerate(page_text.splitlines()):
+        heading = _normalized_source_text(line).lstrip("# ").strip()
+        if heading != normalized_label:
+            continue
+        for following in page_text.splitlines()[index + 1 : index + 5]:
+            if following.lstrip().startswith("#"):
+                break
+            for token in NUMBER_TOKEN_RE.findall(following):
+                try:
+                    observed = parse_financial_number(token)
+                except ValueError:
+                    continue
+                if math.isclose(observed, expected, rel_tol=1e-12, abs_tol=1e-12):
+                    return True
     return False
 
 
@@ -994,6 +1008,30 @@ def _expand_source_backed_candidates(
             )
             expanded.append(_INVALID_SOURCE_CANDIDATE)
             continue
+        submitted_value = raw_candidate.get("value_verbatim")
+        if submitted_value is not None:
+            try:
+                submitted_number = parse_financial_number(str(submitted_value))
+                source_number = parse_financial_number(str(source.get("value_verbatim", "")))
+            except ValueError:
+                submitted_number = source_number = math.nan
+            if not math.isclose(
+                abs(submitted_number),
+                abs(source_number),
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            ):
+                errors.append(
+                    {
+                        "field": f"kpis.{index}.source_id",
+                        "message": (
+                            "source_id points to a different printed number; omit source_id for "
+                            "prose evidence or use the matching source cell"
+                        ),
+                    }
+                )
+                expanded.append(_INVALID_SOURCE_CANDIDATE)
+                continue
         submitted_status = raw_candidate.get("status")
         source_status = source.get("status")
         if submitted_status != source_status:

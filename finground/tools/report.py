@@ -155,13 +155,21 @@ if set(KPI_STATEMENT_GROUP) != set(KPI_KEYS):
 
 DOCUMENT_UNIT_RE = re.compile(
     r"""(?ix)
-    \b(?:all|unless\s+otherwise\s+(?:noted|stated),?\s+all)
-    [^.\n<>]{0,160}
-    \b(?:currency\s+figures|amounts|dollar\s+amounts|financial\s+information)\b
-    [^.\n<>]{0,160}
-    \b(?:expressed|presented|reported)\s+in\s+
-    (?:thousands|millions|billions)\b
-    [^.\n<>]{0,100}
+    (?:
+        \b(?:all|unless\s+otherwise\s+(?:noted|stated),?\s+all)
+        [^.\n<>]{0,160}
+        \b(?:currency\s+figures|amounts|dollar\s+amounts|financial\s+information)\b
+        [^.\n<>]{0,160}
+        \b(?:expressed|presented|reported)\s+in\s+
+        (?:thousands|millions|billions)\b
+        [^.\n<>]{0,100}
+      |
+        \ball\s+monetary\s+values\b
+        [^.\n<>]{0,160}
+        \b(?:are\s+)?(?:stated|expressed|presented|reported)\s+in\s+
+        (?:thousands|millions|billions)\b
+        [^.\n<>]{0,100}
+    )
     """
 )
 
