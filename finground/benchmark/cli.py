@@ -7,7 +7,10 @@ import json
 from pathlib import Path
 
 from finground.benchmark.answer_extractor import extract_output_answers_sync
-from finground.benchmark.kpi_samples import write_grounded_report_ids
+from finground.benchmark.kpi_samples import (
+    write_grounded_multi_parquet,
+    write_grounded_report_ids,
+)
 from finground.benchmark.multi_kpi_runner import run_kpi_sync, run_multi_kpi_sync
 from finground.benchmark.multi_kpi_scorer import score_kpi, score_multi_kpi
 from finground.kpis import KPI_KEYS
@@ -115,6 +118,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sample_parser.add_argument(
         "--output-file", type=_path, required=True, help="reports-file to write for ledger-kpi"
+    )
+
+    multi_sample_parser = commands.add_parser(
+        "ledger-select-multi-samples",
+        help="write a long Parquet slice containing only report-grounded KPI answers",
+    )
+    multi_sample_parser.add_argument(
+        "--parquet", type=_path, required=True, help="official wide LEDGER Parquet"
+    )
+    multi_sample_parser.add_argument(
+        "--min-per-kpi",
+        type=_positive_int,
+        default=5,
+        help="minimum grounded answers selected for every KPI (default: 5)",
+    )
+    multi_sample_parser.add_argument(
+        "--max-reports",
+        type=_positive_int,
+        default=50,
+        help="maximum reports in the grounded multi slice (default: 50)",
+    )
+    multi_sample_parser.add_argument(
+        "--max-per-ticker",
+        type=_positive_int,
+        default=1,
+        help="maximum selected years for one ticker (default: 1)",
+    )
+    multi_sample_parser.add_argument(
+        "--output-file", type=_path, required=True, help="long Parquet file to write"
     )
 
     score_multi_parser = commands.add_parser(
@@ -225,6 +257,16 @@ def main() -> None:
             args.parquet,
             kpi=args.kpi,
             limit=args.limit,
+            max_per_ticker=args.max_per_ticker,
+            output_file=args.output_file,
+        )
+        print(json.dumps(result, indent=2))
+        return
+    if args.command == "ledger-select-multi-samples":
+        result = write_grounded_multi_parquet(
+            args.parquet,
+            min_per_kpi=args.min_per_kpi,
+            max_reports=args.max_reports,
             max_per_ticker=args.max_per_ticker,
             output_file=args.output_file,
         )

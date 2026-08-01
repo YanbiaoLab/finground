@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import math
 import re
+from collections import Counter
 from html import unescape
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 from finground.benchmark.parquet import REPORT_COLUMNS, iter_parquet_rows
 from finground.kpis import KPI_ALIASES, KPI_KEYS
+
+MULTI_METADATA_COLUMNS = ("company_name", "industry")
 
 
 def _visible_text(text: str) -> str:
@@ -19,20 +25,23 @@ def _label_text(text: str) -> str:
     return " ".join(re.sub(r"[^\w&]+", " ", text).split())
 
 
+KPI_LABELS = {
+    kpi: tuple(_label_text(_visible_text(alias)) for alias in aliases)
+    for kpi, aliases in KPI_ALIASES.items()
+}
+
+
 def _evidence_lines(text: str) -> tuple[str, ...]:
     """Return individual table rows and prose lines instead of one document blob."""
     html_rows = re.findall(r"<tr\b[^>]*>.*?</tr>", text, flags=re.IGNORECASE | re.DOTALL)
-    without_html_rows = re.sub(
-        r"<tr\b[^>]*>.*?</tr>", "\n", text, flags=re.IGNORECASE | re.DOTALL
-    )
+    without_html_rows = re.sub(r"<tr\b[^>]*>.*?</tr>", "\n", text, flags=re.IGNORECASE | re.DOTALL)
     candidates = [*html_rows, *without_html_rows.splitlines()]
     return tuple(visible for item in candidates if (visible := _visible_text(item)))
 
 
 def _contains_printed_value(text: str, tokens: tuple[str, ...]) -> bool:
     return any(
-        re.search(rf"(?<![\d.]){re.escape(token.casefold())}(?![\d.])", text)
-        for token in tokens
+        re.search(rf"(?<![\d.]){re.escape(token.casefold())}(?![\d.])", text) for token in tokens
     )
 
 
@@ -51,6 +60,26 @@ def _printed_value_tokens(value: float) -> tuple[str, ...]:
     return tuple(dict.fromkeys(token for token in tokens if len(token) >= 2))
 
 
+def _grounded_kpis(row: dict[str, object]) -> dict[str, float]:
+    evidence_lines = tuple(
+        (line, _label_text(line)) for line in _evidence_lines(str(row["mmd_text"]))
+    )
+    grounded: dict[str, float] = {}
+    for kpi in KPI_KEYS:
+        raw_value = row.get(kpi)
+        if not isinstance(raw_value, int | float) or not math.isfinite(float(raw_value)):
+            continue
+        labels = KPI_LABELS[kpi]
+        value_tokens = _printed_value_tokens(float(raw_value))
+        if any(
+            any(label in labeled_line for label in labels)
+            and _contains_printed_value(line, value_tokens)
+            for line, labeled_line in evidence_lines
+        ):
+            grounded[kpi] = float(raw_value)
+    return grounded
+
+
 def select_grounded_report_ids(
     parquet_path: Path,
     *,
@@ -66,7 +95,7 @@ def select_grounded_report_ids(
     if max_per_ticker < 1:
         raise ValueError("max_per_ticker must be at least 1")
     columns = (*REPORT_COLUMNS, kpi)
-    labels = tuple(_label_text(_visible_text(alias)) for alias in KPI_ALIASES[kpi])
+    labels = KPI_LABELS[kpi]
     selected: list[str] = []
     ticker_counts: dict[str, int] = {}
     for row in iter_parquet_rows(parquet_path, columns, batch_size=32):
@@ -89,6 +118,108 @@ def select_grounded_report_ids(
         if len(selected) == limit:
             break
     return selected
+
+
+def select_grounded_multi_rows(
+    parquet_path: Path,
+    *,
+    min_per_kpi: int,
+    max_reports: int,
+    max_per_ticker: int = 1,
+) -> tuple[list[dict[str, object]], dict[str, int]]:
+    """Greedily select reports whose visible evidence covers every KPI."""
+    if min_per_kpi < 1:
+        raise ValueError("min_per_kpi must be at least 1")
+    if max_reports < 1:
+        raise ValueError("max_reports must be at least 1")
+    if max_per_ticker < 1:
+        raise ValueError("max_per_ticker must be at least 1")
+    columns = (*REPORT_COLUMNS, *MULTI_METADATA_COLUMNS, *KPI_KEYS)
+    candidates = []
+    for row in iter_parquet_rows(parquet_path, columns, batch_size=16):
+        grounded = _grounded_kpis(row)
+        if grounded:
+            candidates.append((row, grounded))
+
+    selected: list[dict[str, object]] = []
+    counts: Counter[str] = Counter()
+    ticker_counts: Counter[str] = Counter()
+    remaining = candidates
+    while (
+        remaining
+        and len(selected) < max_reports
+        and any(counts[kpi] < min_per_kpi for kpi in KPI_KEYS)
+    ):
+        eligible = [
+            item for item in remaining if ticker_counts[str(item[0]["ticker"])] < max_per_ticker
+        ]
+        if not eligible:
+            break
+        best = max(
+            eligible,
+            key=lambda item: (
+                sum(counts[kpi] < min_per_kpi for kpi in item[1]),
+                len(item[1]),
+                -int(item[0]["year"]),
+                str(item[0]["ticker"]),
+            ),
+        )
+        remaining.remove(best)
+        row, grounded = best
+        selected.append(row | {"grounded_kpis": grounded})
+        ticker_counts[str(row["ticker"])] += 1
+        counts.update(grounded.keys())
+    return selected, {kpi: counts[kpi] for kpi in KPI_KEYS}
+
+
+def write_grounded_multi_parquet(
+    parquet_path: Path,
+    *,
+    min_per_kpi: int,
+    max_reports: int,
+    max_per_ticker: int,
+    output_file: Path,
+) -> dict[str, object]:
+    """Write a long LEDGER slice containing only report-grounded KPI answers."""
+    selected, counts = select_grounded_multi_rows(
+        parquet_path,
+        min_per_kpi=min_per_kpi,
+        max_reports=max_reports,
+        max_per_ticker=max_per_ticker,
+    )
+    uncovered = [kpi for kpi, count in counts.items() if count < min_per_kpi]
+    if uncovered:
+        names = ", ".join(uncovered)
+        raise ValueError(
+            f"could not select {min_per_kpi} grounded reports for every KPI within "
+            f"max_reports={max_reports}; under-covered: {names}"
+        )
+    rows = [
+        {
+            "ticker": row["ticker"],
+            "exchange": row["exchange"],
+            "company_name": row["company_name"],
+            "industry": row["industry"],
+            "year": row["year"],
+            "kpi": kpi,
+            "value": value,
+            "mmd_text": row["mmd_text"],
+        }
+        for row in selected
+        for kpi, value in row["grounded_kpis"].items()
+    ]
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.Table.from_pylist(rows), output_file)
+    return {
+        "requested_min_per_kpi": min_per_kpi,
+        "max_reports": max_reports,
+        "max_per_ticker": max_per_ticker,
+        "selected_report_count": len(selected),
+        "grounded_answer_count": len(rows),
+        "per_kpi_counts": counts,
+        "report_ids": [f"{row['exchange']}_{row['ticker']}_{int(row['year'])}" for row in selected],
+        "output_file": str(output_file),
+    }
 
 
 def write_grounded_report_ids(

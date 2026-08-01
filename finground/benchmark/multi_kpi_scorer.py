@@ -113,7 +113,7 @@ def _load_ground_truth(
     parquet_path: Path,
     allowed_pairs: set[tuple[str, int]],
     requested_kpis: tuple[str, ...],
-) -> dict[tuple[str, int, str], dict]:
+) -> tuple[dict[tuple[str, int, str], dict], bool]:
     ground_truth: dict[tuple[str, int, str], dict] = {}
     schemas = [set(pq.ParquetFile(path).schema_arrow.names) for path in parquet_files(parquet_path)]
     wide_columns = {*GROUND_TRUTH_COLUMNS[:5], *requested_kpis}
@@ -151,7 +151,7 @@ def _load_ground_truth(
             value = row[kpi]
             if value is not None:
                 ground_truth[(pair[0], pair[1], kpi)] = metadata | {"value": float(value)}
-    return ground_truth
+    return ground_truth, long_format
 
 
 def _classify(
@@ -322,7 +322,9 @@ def score_multi_kpi(
         for run in runs
         if run["ticker"] is not None and run["year"] is not None
     }
-    ground_truth = _load_ground_truth(parquet_path, allowed_pairs, requested_kpis)
+    ground_truth, sparse_ground_truth = _load_ground_truth(
+        parquet_path, allowed_pairs, requested_kpis
+    )
 
     prediction_index: dict[tuple[str, int, str], dict] = {}
     for prediction in predictions:
@@ -332,7 +334,10 @@ def score_multi_kpi(
             prediction_index.setdefault(key, prediction)
 
     rows: list[dict] = []
-    for ticker, year, kpi in sorted(set(ground_truth) | set(prediction_index)):
+    scored_keys = (
+        set(ground_truth) if sparse_ground_truth else set(ground_truth) | set(prediction_index)
+    )
+    for ticker, year, kpi in sorted(scored_keys):
         truth = ground_truth.get((ticker, year, kpi))
         prediction = prediction_index.get((ticker, year, kpi))
         truth_value = truth["value"] if truth else None

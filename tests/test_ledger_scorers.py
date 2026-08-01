@@ -63,6 +63,7 @@ def test_cli_exposes_only_supported_ledger_commands() -> None:
         "ledger-kpi",
         "ledger-multi",
         "ledger-select-kpi-samples",
+        "ledger-select-multi-samples",
         "ledger-score-kpi",
         "ledger-score-multi",
     }
@@ -209,6 +210,24 @@ def test_single_kpi_scorer_accepts_official_ledger_long_parquet(tmp_path: Path) 
     )
 
     assert result["quality_gate"]["passed"] is True
+
+
+def test_sparse_long_ground_truth_does_not_treat_unannotated_kpis_as_extra(
+    tmp_path: Path,
+) -> None:
+    predictions = tmp_path / "predictions"
+    (predictions / "raw").mkdir(parents=True)
+    source = FIXTURE / "multi" / "raw" / "NYSE_ACME_2023.json"
+    (predictions / "raw" / source.name).write_text(source.read_text())
+    _write_multi_scope(predictions)
+    parquet_path = tmp_path / "grounded-long.parquet"
+    _write_long_ground_truth(parquet_path)
+
+    result = score_multi_kpi(output_dir=predictions, parquet_path=parquet_path)
+
+    assert result["matched"] == 1
+    assert result["extra"] == 0
+    assert result["precision"] == 1.0
 
 
 def test_internal_multi_scorer_scores_incomplete_partial_predictions(tmp_path: Path) -> None:
