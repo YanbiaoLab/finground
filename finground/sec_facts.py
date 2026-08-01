@@ -303,6 +303,15 @@ def _registrant_name(text: str) -> str | None:
     )
     if exact_name:
         return exact_name.group(1).strip(" #")
+    mda_company = re.search(
+        r"(?i)management(?:'s|’s)? discussion and analysis[\s\S]{0,400}?"
+        r"(?:results|financial results)\s+of\s+"
+        r"([A-Z][A-Za-z0-9&'., -]{2,100}?(?:Corp\.?|Corporation|Inc\.?|Ltd\.?|Limited|plc))"
+        r"\s+for the",
+        cover,
+    )
+    if mda_company:
+        return mda_company.group(1).strip()
     for match in re.finditer(r"(?im)^#{1,3}\s+(.{2,100}?)\s*$", cover[:2_000]):
         candidate = re.sub(
             r"\s+\d{4}\s+(?:achievements|annual report)\s*$",

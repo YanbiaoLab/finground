@@ -154,6 +154,20 @@ Central Garden & Pet Company
     assert _registrant_name(text) == "Central Garden & Pet Company"
 
 
+def test_report_identity_prefers_mda_company_over_cover_slogan() -> None:
+    text = """\
+## BUILDING
+OUR FUTURE
+
+## MANAGEMENT'S DISCUSSION AND ANALYSIS
+
+The following is management's discussion and analysis of the operating and financial results
+of Baytex Energy Corp. for the years ended December 31, 2017 and 2016.
+"""
+
+    assert _registrant_name(text) == "Baytex Energy Corp."
+
+
 def test_report_identity_combines_multiline_company_name_before_ticker() -> None:
     text = """\
 # ANNUAL
