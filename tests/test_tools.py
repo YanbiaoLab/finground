@@ -29,7 +29,11 @@ from finground.tools import (
     search_report,
     submit_multi_kpi_extraction,
 )
-from finground.tools.submission import _line_contains_number, _semantic_row_error
+from finground.tools.submission import (
+    _line_contains_number,
+    _semantic_row_error,
+    _structural_evidence_error,
+)
 
 REPORT = Path(__file__).parent / "fixtures" / "ledger" / "report.mmd"
 
@@ -110,11 +114,22 @@ def test_capex_semantics_accepts_property_additions_on_cash_flow_statement() -> 
     )
 
 
-def test_capex_semantics_rejects_property_additions_without_cash_flow_context() -> None:
+def test_sga_structural_check_rejects_shifted_operating_expense_rows() -> None:
+    page = """\
+<table><tr><td>Selling expenses</td><td></td><td></td></tr>
+<tr><td>General and administrative expenses</td><td>18,949</td></tr>
+<tr><td>Research and development expenses</td><td>19,761</td></tr>
+<tr><td>Total operating expenses</td><td>33,551</td></tr></table>
+"""
+
     assert (
-        _semantic_row_error("capex", "Additions to oil and gas properties", "found")
+        _structural_evidence_error("sga_expense", "General and administrative expenses", page)
         is not None
     )
+
+
+def test_capex_semantics_rejects_property_additions_without_cash_flow_context() -> None:
+    assert _semantic_row_error("capex", "Additions to oil and gas properties", "found") is not None
 
 
 def test_report_state_contains_document_pages() -> None:
@@ -772,6 +787,62 @@ def test_source_backed_value_inherits_scale_from_corroborating_source_cell() -> 
     assert recorded["unit_text"] == "(Dollars in millions)"
     assert recorded["unit_page"] == 2
     assert recorded["value"] == 243_000_000
+
+
+def test_source_backed_sga_repairs_shifted_row_to_intact_duplicate() -> None:
+    report = Report(
+        "NASDAQ_ACME_2023",
+        "NASDAQ",
+        "ACME",
+        2023,
+        """\
+## Consolidated Statements of Income
+(In thousands of USD)
+<table><tr><td>Year ended</td><td>2023</td></tr>
+<tr><td>Selling expenses</td><td></td></tr>
+<tr><td>General and administrative expenses</td><td>18,949</td></tr>
+<tr><td>Research and development expenses</td><td>19,761</td></tr>
+<tr><td>Total operating expenses</td><td>33,551</td></tr></table>
+<--- Page Split --->
+## Results of Operations
+(In thousands of USD)
+<table><tr><td>Year ended</td><td>2023</td></tr>
+<tr><td>Selling expenses</td><td>18,949</td></tr>
+<tr><td>General and administrative expenses</td><td>19,761</td></tr>
+<tr><td>Research and development expenses</td><td>33,551</td></tr></table>
+""",
+    )
+    context = SimpleNamespace(
+        state={"report": build_report_state(report)},
+        actions=SimpleNamespace(skip_summarization=None),
+    )
+    read_result = read_report_pages([1, 2], [], context)
+    shifted_source = next(
+        cell
+        for cell in read_result["pages"][0]["source_cells"]
+        if cell["row_label"] == "General and administrative expenses"
+    )
+
+    result = record_multi_kpi_progress(
+        "USD",
+        "In thousands of USD",
+        [
+            {
+                "kpi": "sga_expense",
+                "fiscal_year": 2023,
+                "status": "found",
+                "value_verbatim": "18,949",
+                "source_id": shifted_source["source_id"],
+            }
+        ],
+        [],
+        context,
+    )
+
+    assert result["status"] == "success"
+    recorded = context.state[MULTI_KPI_WORK_RECORD_STATE_KEY]["kpis"][0]
+    assert recorded["page"] == 2
+    assert recorded["value"] == 19_761_000
 
 
 def test_search_report_combines_ranked_and_exact_phrase_search() -> None:
@@ -1584,7 +1655,9 @@ def test_record_multi_kpi_progress_normalizes_interest_expense_as_positive_cost(
     assert recorded["normalization"]["sign_rule"] == "positive_magnitude"
 
 
-@pytest.mark.parametrize("kpi,line_label", [("capex", "Purchase of equipment"), ("dividends_paid", "Dividends paid")])
+@pytest.mark.parametrize(
+    "kpi,line_label", [("capex", "Purchase of equipment"), ("dividends_paid", "Dividends paid")]
+)
 def test_record_multi_kpi_progress_preserves_lse_outflow_sign(
     kpi: str,
     line_label: str,
@@ -1650,10 +1723,7 @@ def test_record_multi_kpi_progress_sums_verified_capex_component_sources() -> No
         ["Purchase of property", "Capitalised development"],
         context,
     )
-    cells = {
-        cell["row_label"]: cell["source_id"]
-        for cell in page["pages"][0]["source_cells"]
-    }
+    cells = {cell["row_label"]: cell["source_id"] for cell in page["pages"][0]["source_cells"]}
     evidence = {
         "kpi": "capex",
         "fiscal_year": 2023,

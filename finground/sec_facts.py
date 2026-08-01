@@ -271,6 +271,15 @@ def _report_cik(text: str) -> str | None:
 
 def _registrant_name(text: str) -> str | None:
     cover = text[:40_000]
+    plain_report_title = re.search(
+        r"(?im)^\s*([A-Z][^\n]{2,100}?)\s*(?:\r?\n){1,3}\s*"
+        r"\d{4}\s+Annual Report\s*$",
+        cover[:2_000],
+    )
+    if plain_report_title:
+        candidate = plain_report_title.group(1).strip(" #:-")
+        if candidate.casefold() not in {"annual", "financial", "working together"}:
+            return candidate
     ticker_cover_name = re.search(
         r"(?m)^([A-Z][A-Z &'.-]{2,60})\s*\n"
         r"([A-Z][A-Z &'.-]{2,60})\s*\n(?:NASDAQ|NYSE|AMEX)\s*:",

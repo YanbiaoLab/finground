@@ -132,6 +132,36 @@ def _normalized_source_text(text: str) -> str:
     return " ".join(visible_text.casefold().split())
 
 
+def _structural_evidence_error(kpi: str, line_label: str, page_text: str) -> str | None:
+    """Reject a known row-shift shape instead of trusting mislabeled OCR cells."""
+    if kpi != "sga_expense" or "general and administrative" not in _normalized_source_text(
+        line_label
+    ):
+        return None
+    rows = [
+        [
+            _normalized_source_text(cell_match.group(2))
+            for cell_match in _HTML_CELL_RE.finditer(row_match.group(1))
+        ]
+        for row_match in _HTML_ROW_RE.finditer(page_text)
+    ]
+    for index, cells in enumerate(rows):
+        if (
+            len(cells) >= 2
+            and cells[0] == "selling expenses"
+            and not any(cells[1:])
+            and index + 3 < len(rows)
+            and rows[index + 1][0] == "general and administrative expenses"
+            and rows[index + 2][0] == "research and development expenses"
+            and rows[index + 3][0] == "total operating expenses"
+        ):
+            return (
+                "source table has an empty selling-expense row followed by shifted G&A, R&D, "
+                "and total cells; use an intact reconciled duplicate disclosure"
+            )
+    return None
+
+
 def _semantic_row_error(
     kpi: str,
     line_label: str,
@@ -655,6 +685,17 @@ def _normalize_multi_kpi_candidates(
                 }
             )
             continue
+        structural_error = _structural_evidence_error(
+            candidate.kpi, candidate.line_label, page_text
+        )
+        if structural_error is not None:
+            errors.append(
+                {
+                    "field": f"kpis.{index}.page",
+                    "message": f"structural mismatch: {structural_error}",
+                }
+            )
+            continue
         evidence_error_count = len(errors)
         if (
             index not in source_backed_indexes
@@ -824,8 +865,7 @@ def _normalize_multi_kpi_candidates(
                 )
                 continue
             preserve_ledger_outflow_sign = (
-                candidate.kpi in POSITIVE_OUTFLOW_KPIS
-                and (ledger_exchange or "").upper() == "LSE"
+                candidate.kpi in POSITIVE_OUTFLOW_KPIS and (ledger_exchange or "").upper() == "LSE"
             )
             if preserve_ledger_outflow_sign:
                 value = parsed_number * SCALE_MULTIPLIERS[scale]
@@ -1008,8 +1048,37 @@ def _expand_source_backed_candidates(
             )
             expanded.append(_INVALID_SOURCE_CANDIDATE)
             continue
+        source_repaired = False
+        raw_kpi = raw_candidate.get("kpi")
+        source_page_text = page_text_by_number.get(source.get("page"), "")
+        if (
+            raw_kpi == "sga_expense"
+            and _structural_evidence_error(
+                raw_kpi, str(source.get("row_label", "")), source_page_text
+            )
+            is not None
+        ):
+            for alternative in source_cells.values():
+                if (
+                    not isinstance(alternative, dict)
+                    or alternative.get("source_id") == source.get("source_id")
+                    or alternative.get("fiscal_year") != source.get("fiscal_year")
+                    or alternative.get("status") != source.get("status")
+                    or _normalized_source_text(str(alternative.get("row_label", "")))
+                    != _normalized_source_text(str(source.get("row_label", "")))
+                    or _structural_evidence_error(
+                        raw_kpi,
+                        str(alternative.get("row_label", "")),
+                        page_text_by_number.get(alternative.get("page"), ""),
+                    )
+                    is not None
+                ):
+                    continue
+                source = alternative
+                source_repaired = True
+                break
         submitted_value = raw_candidate.get("value_verbatim")
-        if submitted_value is not None:
+        if submitted_value is not None and not source_repaired:
             try:
                 submitted_number = parse_financial_number(str(submitted_value))
                 source_number = parse_financial_number(str(source.get("value_verbatim", "")))

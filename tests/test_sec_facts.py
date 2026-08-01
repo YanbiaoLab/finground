@@ -103,6 +103,18 @@ Exhibit for Webster Business Credit Corporation
     assert _registrant_name(text) == "Manhattan Bridge Capital"
 
 
+def test_report_identity_reads_plain_company_line_before_annual_report_title() -> None:
+    text = """\
+Barnwell Industries, Inc.
+
+2017 Annual Report
+
+## FINANCIAL AND OPERATING HIGHLIGHTS
+"""
+
+    assert _registrant_name(text) == "Barnwell Industries, Inc."
+
+
 def test_report_identity_uses_early_company_heading_before_later_legal_names() -> None:
     text = """\
 Working Together
