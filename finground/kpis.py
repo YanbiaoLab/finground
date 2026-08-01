@@ -196,7 +196,10 @@ PER_SHARE_KPIS = {"eps_basic", "eps_diluted"}
 SHARE_COUNT_KPIS = {"shares_outstanding"}
 POSITIVE_OUTFLOW_KPIS = {"capex", "dividends_paid"}
 POSITIVE_MAGNITUDE_KPIS = POSITIVE_OUTFLOW_KPIS | {
+    "cost_of_revenue",
     "interest_expense",
+    "sga_expense",
+    "total_liabilities",
     "long_term_debt_total",
     "long_term_debt_noncurrent",
     "long_term_debt_current",

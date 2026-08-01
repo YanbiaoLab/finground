@@ -29,6 +29,7 @@ from finground.tools import (
     search_report,
     submit_multi_kpi_extraction,
 )
+from finground.tools.submission import _semantic_row_error
 
 REPORT = Path(__file__).parent / "fixtures" / "ledger" / "report.mmd"
 
@@ -74,6 +75,19 @@ def _absent_coverage(*excluded: str) -> list[dict]:
         for kpi in KPI_KEYS
         if kpi not in excluded
     ]
+
+
+@pytest.mark.parametrize(
+    "label",
+    ("Total Income (Loss)", "Total revenues and other income", "Net portfolio income"),
+)
+def test_revenue_semantics_accepts_printed_mortgage_reit_aggregates(label: str) -> None:
+    assert _semantic_row_error("revenue", label, "found") is None
+
+
+@pytest.mark.parametrize("label", ("Interest income", "Net interest income", "Net income"))
+def test_revenue_semantics_rejects_reit_components_and_bottom_line(label: str) -> None:
+    assert _semantic_row_error("revenue", label, "found") is not None
 
 
 def test_report_state_contains_document_pages() -> None:
@@ -280,6 +294,31 @@ def test_kpi_candidate_lookup_returns_only_compact_ranked_source_cells() -> None
     assert result["candidates"][0]["row_label"] == "Revenue"
     assert result["candidates"][0]["source_id"] == "p3:t0:r1:c1"
     assert "text" not in result["candidates"][0]
+
+
+def test_apostrophe_thousands_in_table_header_is_traceable_unit_evidence() -> None:
+    report = Report(
+        "LSE_ACME_2023",
+        "LSE",
+        "ACME",
+        2023,
+        """\
+## Consolidated income statement
+<table><tr><td></td><td>2023 (&#x27;000</td><td>2022 (&#x27;000</td></tr>
+<tr><td>Revenue</td><td>301,389</td><td>108,449</td></tr></table>
+""",
+    )
+    context = SimpleNamespace(
+        state={"report": build_report_state(report)},
+        actions=SimpleNamespace(skip_summarization=None),
+    )
+
+    result = read_report_pages([1], [], context)
+    revenue = next(
+        cell for cell in result["pages"][0]["source_cells"] if cell["row_label"] == "Revenue"
+    )
+
+    assert revenue["unit_text"] == "'000"
 
 
 def test_primary_statement_without_header_uses_first_value_as_report_year() -> None:

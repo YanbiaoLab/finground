@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from finground.benchmark.answer_extractor import extract_output_answers_sync
+from finground.benchmark.kpi_samples import write_grounded_report_ids
 from finground.benchmark.multi_kpi_runner import run_kpi_sync, run_multi_kpi_sync
 from finground.benchmark.multi_kpi_scorer import score_kpi, score_multi_kpi
 from finground.kpis import KPI_KEYS
@@ -94,6 +95,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     multi_parser = commands.add_parser("ledger-multi", help="run all 31 KPI specialists")
     add_run_options(multi_parser, default_output=DEFAULT_OUTPUT_ROOT / "multi")
+
+    sample_parser = commands.add_parser(
+        "ledger-select-kpi-samples",
+        help="select reports where a KPI ground-truth value is visible in report text",
+    )
+    sample_parser.add_argument("--kpi", required=True, choices=KPI_KEYS, help="KPI to sample")
+    sample_parser.add_argument(
+        "--parquet", type=_path, required=True, help="official wide LEDGER Parquet"
+    )
+    sample_parser.add_argument(
+        "--limit", type=_positive_int, default=5, help="maximum reports to select (default: 5)"
+    )
+    sample_parser.add_argument(
+        "--max-per-ticker",
+        type=_positive_int,
+        default=1,
+        help="maximum selected years for one ticker (default: 1)",
+    )
+    sample_parser.add_argument(
+        "--output-file", type=_path, required=True, help="reports-file to write for ledger-kpi"
+    )
 
     score_multi_parser = commands.add_parser(
         "ledger-score-multi",
@@ -195,6 +217,16 @@ def main() -> None:
             resume=args.resume,
             concurrency=args.concurrency,
             **kwargs,
+        )
+        print(json.dumps(result, indent=2))
+        return
+    if args.command == "ledger-select-kpi-samples":
+        result = write_grounded_report_ids(
+            args.parquet,
+            kpi=args.kpi,
+            limit=args.limit,
+            max_per_ticker=args.max_per_ticker,
+            output_file=args.output_file,
         )
         print(json.dumps(result, indent=2))
         return

@@ -4,6 +4,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from finground.benchmark.kpi_samples import select_grounded_report_ids
 from finground.benchmark.multi_kpi_runner import run_multi_kpi_sync
 from finground.benchmark.parquet import iter_multi_reports
 from finground.tools import build_report_state
@@ -67,3 +68,23 @@ def test_parquet_runner_accepts_files_without_model_calls(tmp_path: Path) -> Non
     assert multi_result["input_format"] == "parquet"
     assert multi_result["reports_processed"] == 0
     assert json.loads((multi_output / "run_meta.json").read_text())["input_format"] == "parquet"
+
+
+def test_grounded_kpi_selector_requires_visible_label_and_value(tmp_path: Path) -> None:
+    path = tmp_path / "multi.parquet"
+    _write_parquet(
+        path,
+        {
+            "ticker": ["MATCH", "NO_VALUE", "NO_LABEL"],
+            "exchange": ["NYSE", "NYSE", "NYSE"],
+            "year": [2023, 2023, 2023],
+            "mmd_text": [
+                "Revenue | 1,234 | 2023",
+                "Revenue | 999 | 2023",
+                "Metric | 1,234 | 2023",
+            ],
+            "revenue": [1_234_000.0, 1_234_000.0, 1_234_000.0],
+        },
+    )
+
+    assert select_grounded_report_ids(path, kpi="revenue", limit=2) == ["NYSE_MATCH_2023"]

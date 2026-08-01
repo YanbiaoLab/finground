@@ -23,6 +23,8 @@ _UNIT_LINE_RE = re.compile(
         |
         (?:thousands|millions|billions)\s+of\s+
         (?:[a-z]+\s+){0,4}(?:dollars|euros|pounds|yen|shares)\b
+        |
+        (?:[$€£¥]\s*)?['’]000\b
     )
     """
 )
@@ -129,8 +131,8 @@ def _html_table_unit_texts(page_text: str) -> list[str | None]:
     previous_table_end = 0
     for table_match in _HTML_TABLE_RE.finditer(page_text):
         prefix_start = max(previous_table_end, table_match.start() - 800)
-        prefix = page_text[prefix_start : table_match.start()]
-        table_header = table_match.group()[:1_000]
+        prefix = unescape(page_text[prefix_start : table_match.start()])
+        table_header = unescape(table_match.group()[:1_000])
         prefix_matches = list(_UNIT_LINE_RE.finditer(prefix))
         header_match = _UNIT_LINE_RE.search(table_header)
         match = header_match or (prefix_matches[-1] if prefix_matches else None)

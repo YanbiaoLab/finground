@@ -39,7 +39,6 @@ from finground.agents.kpi import (
     total_assets,
     total_liabilities,
 )
-from finground.agents.kpi.base import KpiAgentSpec
 from finground.kpis import KPI_KEYS
 
 AgentFactory = Callable[..., Agent]
@@ -78,12 +77,11 @@ _MODULES = (
     dividends_paid,
 )
 
-KPI_AGENT_SPECS: dict[str, KpiAgentSpec] = {module.SPEC.kpi: module.SPEC for module in _MODULES}
 KPI_AGENT_FACTORIES: dict[str, AgentFactory] = {
-    module.SPEC.kpi: module.create_agent for module in _MODULES
+    kpi: module.create_agent for kpi, module in zip(KPI_KEYS, _MODULES, strict=True)
 }
 
-if tuple(KPI_AGENT_SPECS) != KPI_KEYS or tuple(KPI_AGENT_FACTORIES) != KPI_KEYS:
+if tuple(KPI_AGENT_FACTORIES) != KPI_KEYS:
     raise RuntimeError("KPI agent registry must contain exactly one module per canonical KPI")
 
 

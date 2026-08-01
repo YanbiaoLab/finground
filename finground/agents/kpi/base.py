@@ -1,9 +1,12 @@
-"""Shared ADK plumbing for independently optimized KPI agents."""
+"""Mechanical ADK runtime support for autonomous KPI agent modules.
+
+This module deliberately owns no KPI definitions, evidence policy, or prompts.
+Those decisions belong to the 31 specialist modules so they can diverge freely.
+"""
 
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
 from typing import Any
 
 from google.adk.agents import Agent
@@ -13,7 +16,6 @@ from google.adk.tools.tool_context import ToolContext
 from google.genai import types as genai_types
 
 from finground.agents.common import ADK_MODEL
-from finground.kpis import KPI_ALIASES, KPI_DESCRIPTIONS
 from finground.tools import (
     MULTI_KPI_WORK_RECORD_STATE_KEY,
     REPORT_STATE_KEY,
@@ -27,19 +29,7 @@ from finground.tools.structured import JsonSchemaFunctionTool
 
 KPI_AGENT_NAME_PREFIX = "extract_"
 KPI_SPECIALIST_SEARCH_LIMIT = 2
-KPI_SPECIALIST_MODEL_TURN_LIMIT = 4
-
-
-@dataclass(frozen=True, slots=True)
-class KpiAgentSpec:
-    """All KPI-specific behavior owned by one specialist module."""
-
-    kpi: str
-    source_priority: str
-    accept: str
-    reject: str
-    search_labels: tuple[str, ...]
-    extra_instruction: str = ""
+KPI_SPECIALIST_MODEL_TURN_LIMIT = 6
 
 
 def kpi_agent_name(kpi: str) -> str:
@@ -222,63 +212,30 @@ def _force_specialist_closure(kpi: str):
     return force_specialist_closure
 
 
-def _instruction(spec: KpiAgentSpec) -> str:
-    kpi = spec.kpi
-    labels = ", ".join(f'"{label}"' for label in spec.search_labels)
-    aliases = ", ".join(f'"{alias}"' for alias in KPI_ALIASES[kpi])
-    return f"""You are the context-isolated specialist for exactly one canonical KPI: {kpi}.
-Do not find, judge, or record any other KPI.
-
-CANONICAL DEFINITION:
-{KPI_DESCRIPTIONS[kpi]}
-
-SOURCE AND SCOPE:
-- Source priority: {spec.source_priority}.
-- Accept only: {spec.accept}.
-- Reject: {spec.reject}.
-- Useful report labels: {labels}.
-- Canonical aliases: {aliases}.
-{spec.extra_instruction}
-
-WORKFLOW:
-1. Call find_{kpi}_candidates once. Treat lexical matches only as candidates.
-2. If one candidate satisfies the definition, record exactly one {kpi} row with its source_id.
-3. Otherwise search with precise labels, then read at most three strongest related pages.
-4. Never invent or calculate a value. Copy exact visible evidence when no source_id exists.
-5. Record absent only after the bounded source check finds no matching row. Record ambiguous when
-   relevant evidence exists but year, unit, consolidation scope, or definition remains unresolved.
-
-QUALITY RULES:
-- Use only the report fiscal year and prefer audited consolidated statements and notes.
-- A multiplier applies only when exact visible unit text governs the cited row.
-- Never interchange parent/NCI, restricted/unrestricted cash, debt scopes, activity subtotals,
-  per-share values, or period-end/weighted-average shares.
-- After rejected evidence, try one genuinely different source or record ambiguous.
-
-Finish only after record_multi_kpi_progress persists this KPI."""
-
-
-def build_kpi_agent(spec: KpiAgentSpec, *, max_output_tokens: int) -> Agent:
-    """Build one KPI agent from its module-owned specification."""
-    candidate_tool = _candidate_tool(spec.kpi)
+def build_specialist_agent(
+    *,
+    kpi: str,
+    description: str,
+    instruction: str,
+    max_output_tokens: int,
+) -> Agent:
+    """Attach module-owned KPI behavior to the common ADK runtime."""
+    candidate_tool = _candidate_tool(kpi)
     return Agent(
-        name=kpi_agent_name(spec.kpi),
+        name=kpi_agent_name(kpi),
         model=ADK_MODEL,
-        description=(
-            f"Finds and records only {spec.kpi}. Uses {spec.source_priority}; "
-            f"accepts {spec.accept}; rejects {spec.reject}."
-        ),
-        instruction=_instruction(spec),
+        description=description,
+        instruction=instruction,
         include_contents="none",
         tools=[
             candidate_tool,
-            _search_tool(spec.kpi),
+            _search_tool(kpi),
             read_report_pages,
-            _specialized_record_tool(spec.kpi),
+            _specialized_record_tool(kpi),
         ],
-        before_tool_callback=_retrieval_budget_callback(spec.kpi, candidate_tool.__name__),
-        after_model_callback=_force_specialist_closure(spec.kpi),
-        after_tool_callback=_finish_after_recording(spec.kpi),
+        before_tool_callback=_retrieval_budget_callback(kpi, candidate_tool.__name__),
+        after_model_callback=_force_specialist_closure(kpi),
+        after_tool_callback=_finish_after_recording(kpi),
         generate_content_config=genai_types.GenerateContentConfig(
             temperature=0,
             max_output_tokens=max_output_tokens,

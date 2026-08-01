@@ -19,7 +19,7 @@ from google.genai import types as genai_types
 from finground.agents.common import ADK_MODEL
 from finground.agents.kpi_specialists import (
     COMMON_TASK_AGENT_NAME,
-    KPI_AGENT_SPECS,
+    KPI_AGENT_FACTORIES,
     KPI_DISPATCH_TOOL_NAME,
     KPI_SPECIALIST_SEARCH_LIMIT,
     MULTI_KPI_COORDINATOR_NAME,
@@ -36,7 +36,7 @@ from finground.tools import (
 )
 
 MULTI_KPI_APP_NAME = "finground_multi_kpi"
-MULTI_KPI_PROMPT_VERSION = "independent-kpi-agents-v9"
+MULTI_KPI_PROMPT_VERSION = "independent-kpi-agents-v21"
 MULTI_KPI_LLM_CALL_LIMIT = 200
 MULTI_KPI_SEARCH_LIMIT = KPI_SPECIALIST_SEARCH_LIMIT
 MULTI_KPI_PROGRESS_REMINDER_CALL = math.ceil(MULTI_KPI_LLM_CALL_LIMIT * 0.60)
@@ -77,6 +77,14 @@ Use exactly one tool call per response and no prose. Pass pending KPIs in canoni
 
 def resolve_requested_kpis(text: str) -> list[str]:
     """Resolve explicit canonical names/aliases; broad requests mean all KPIs."""
+    raw = text.casefold()
+    canonical_matches = [
+        kpi
+        for kpi in KPI_KEYS
+        if re.search(rf"(?<![a-z0-9_]){re.escape(kpi)}(?![a-z0-9_])", raw)
+    ]
+    if canonical_matches:
+        return canonical_matches
     normalized = re.sub(r"[_\-/]+", " ", text.casefold())
     if any(marker in normalized for marker in ("all kpi", "all supported", "31 kpi")):
         return list(KPI_KEYS)
@@ -89,6 +97,9 @@ def resolve_requested_kpis(text: str) -> list[str]:
 
 
 async def _set_requested_kpi_scope(callback_context: CallbackContext) -> None:
+    requested = callback_context.state.get(MULTI_KPI_REQUESTED_STATE_KEY)
+    if isinstance(requested, list) and requested:
+        return
     events = callback_context._invocation_context.session.events
     for event in reversed(events):
         content = event.content
@@ -210,5 +221,5 @@ def create_multi_kpi_app(*, plugins: list[BasePlugin] | None = None) -> App:
     )
 
 
-if len(KPI_AGENT_SPECS) != len(KPI_KEYS):
+if len(KPI_AGENT_FACTORIES) != len(KPI_KEYS):
     raise RuntimeError("Multi-KPI coordinator requires exactly one specialist per KPI")

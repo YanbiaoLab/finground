@@ -3,7 +3,6 @@
 from finground.agents.common import ADK_MODEL, SETTINGS, create_adk_model
 from finground.agents.kpi_specialists import (
     COMMON_TASK_AGENT_NAME,
-    KPI_AGENT_SPECS,
     MULTI_KPI_COORDINATOR_NAME,
     create_kpi_specialist_agent,
     kpi_agent_name,
@@ -33,7 +32,6 @@ __all__ = [
     "COMMON_TASK_AGENT_NAME",
     "COMMON_TASK_INSTRUCTION",
     "KPI_AGENT_NAMES",
-    "KPI_AGENT_SPECS",
     "KPI_CATALOGUE",
     "MULTI_KPI_APP_NAME",
     "MULTI_KPI_CONTEXT_WINDOW_TOKENS",

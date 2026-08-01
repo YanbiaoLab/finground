@@ -220,7 +220,7 @@ def test_specialist_repeated_budget_exhaustion_records_ambiguous_and_stops() -> 
     assert context.state[MULTI_KPI_WORK_RECORD_STATE_KEY]["kpis"][0]["status"] == ("ambiguous")
 
 
-def test_specialist_fourth_non_record_response_is_forced_to_ambiguous_checkpoint() -> None:
+def test_specialist_sixth_non_record_response_is_forced_to_ambiguous_checkpoint() -> None:
     specialist = create_kpi_specialist_agent("revenue", max_output_tokens=4_096)
     callback = specialist.canonical_after_model_callbacks[0]
     context = SimpleNamespace(
@@ -241,7 +241,7 @@ def test_specialist_fourth_non_record_response_is_forced_to_ambiguous_checkpoint
 
     async def exhaust() -> list[LlmResponse | None]:
         return [
-            await callback(callback_context=context, llm_response=response) for _index in range(4)
+            await callback(callback_context=context, llm_response=response) for _index in range(6)
         ]
 
     results = asyncio.run(exhaust())

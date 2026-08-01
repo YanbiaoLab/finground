@@ -142,6 +142,9 @@ def _semantic_row_error(kpi: str, line_label: str, status: str) -> str | None:
             r"\btotal sales\b",
             r"^sales$",
             r"\b(?:net product|oil and gas) sales\b",
+            r"^total income(?: \(loss\))?$",
+            r"^total revenues and other income$",
+            r"^net portfolio income$",
         ),
         "cost_of_revenue": (
             r"\bcost of (?:revenues?|sales|goods|services|operations)\b",

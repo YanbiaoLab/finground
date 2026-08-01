@@ -1,4 +1,5 @@
 from finground.sec_facts import (
+    _company_identity_score,
     _ordered_cik_candidates,
     _registrant_name,
     _report_cik,
@@ -91,12 +92,62 @@ Corporate Issuer CIK: 738214
     assert _registrant_name(text) == "APACHE CORPORATION"
 
 
-def test_cik_resolution_prefers_exact_ticker_before_fuzzy_historical_hits() -> None:
+def test_report_identity_prefers_company_in_report_title_over_later_exhibit_name() -> None:
+    text = """\
+## Manhattan Bridge Capital Year 2017 Achievements
+
+Exhibit for Webster Business Credit Corporation
+(Exact name of Registrant as specified in its charter)
+"""
+
+    assert _registrant_name(text) == "Manhattan Bridge Capital"
+
+
+def test_report_identity_uses_early_company_heading_before_later_legal_names() -> None:
+    text = """\
+Working Together
+2020 ANNUAL REPORT
+## Stepan
+
+Later discussion of PQ Corporation.
+"""
+
+    assert _registrant_name(text) == "Stepan"
+
+
+def test_report_identity_combines_multiline_company_name_before_ticker() -> None:
+    text = """\
+# ANNUAL
+REPORT
+DECEMBER 31
+2022
+
+MANHATTAN
+BRIDGE CAPITAL
+NASDAQ: LOAN
+"""
+
+    assert _registrant_name(text) == "MANHATTAN BRIDGE CAPITAL"
+
+
+def test_cik_resolution_prefers_current_ticker_before_fuzzy_historical_hits() -> None:
     assert _ordered_cik_candidates(
         explicit_cik=None,
         current_cik="0000123456",
         historical_ciks=["0000999999", "0000123456"],
     ) == ["0000123456", "0000999999"]
+
+
+def test_company_identity_prefers_registrant_name_over_reused_ticker() -> None:
+    assert _company_identity_score(
+        ticker="APA",
+        report_entity="APACHE CORPORATION",
+        facts_entity="APACHE CORPORATION",
+    ) > _company_identity_score(
+        ticker="APA",
+        report_entity="APACHE CORPORATION",
+        facts_entity="APA CORPORATION",
+    )
 
 
 def test_ifrs_annual_facts_are_used_when_us_gaap_is_absent() -> None:

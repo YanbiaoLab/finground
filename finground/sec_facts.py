@@ -271,6 +271,58 @@ def _report_cik(text: str) -> str | None:
 
 def _registrant_name(text: str) -> str | None:
     cover = text[:40_000]
+    ticker_cover_name = re.search(
+        r"(?m)^([A-Z][A-Z &'.-]{2,60})\s*\n"
+        r"([A-Z][A-Z &'.-]{2,60})\s*\n(?:NASDAQ|NYSE|AMEX)\s*:",
+        cover[:2_000],
+    )
+    if ticker_cover_name:
+        return " ".join(ticker_cover_name.groups())
+    titled_company = re.search(
+        r"(?im)^#{1,3}\s+(.{3,100}?)"
+        r"(?:\s+Year\s+\d{4}\b|\s+\d{4}\s+Annual Report\b|\s+Annual Report\b)",
+        cover[:4_000],
+    )
+    if titled_company:
+        candidate = titled_company.group(1).strip(" #:-")
+        if candidate.casefold() not in {"annual", "fiscal", "financial"}:
+            return candidate
+    for match in re.finditer(r"(?im)^#{1,3}\s+(.{2,100}?)\s*$", cover[:2_000]):
+        candidate = re.sub(
+            r"\s+\d{4}\s+(?:achievements|annual report)\s*$",
+            "",
+            match.group(1),
+            flags=re.IGNORECASE,
+        ).strip(" #:-")
+        lowered = candidate.casefold()
+        if any(
+            phrase in lowered
+            for phrase in (
+                "annual",
+                "annual report",
+                "table of contents",
+                "financial highlights",
+                "dear ",
+                "working together",
+                "letter to",
+                "securities and exchange commission",
+                "edgar filing",
+            )
+        ):
+            continue
+        words = candidate.split()
+        looks_like_company = (
+            len(words) == 1
+            or candidate.isupper()
+            or bool(
+                re.search(
+                    r"(?i)\b(?:inc\.?|corp\.?|corporation|company|limited|ltd\.?|plc)\b",
+                    candidate,
+                )
+            )
+        )
+        if 1 <= len(words) <= 8 and looks_like_company:
+            return candidate
     exact_name = re.search(
         r"(?im)^(?:#+\s*)?([A-Z][A-Z0-9&'.,()/ -]{3,100})\s*$"
         r"(?:(?:\r?\n){1,3})(?:\(?Exact name of (?:the )?[Rr]egistrant)",
@@ -296,6 +348,46 @@ def _registrant_name(text: str) -> str | None:
     if name.casefold().startswith(("based in ", "headquartered in ")):
         name = name.rsplit(",", 1)[-1].strip()
     return name
+
+
+_ENTITY_STOP_WORDS = {
+    "the",
+    "inc",
+    "incorporated",
+    "corp",
+    "corporation",
+    "company",
+    "limited",
+    "ltd",
+    "lp",
+    "llc",
+    "nv",
+    "plc",
+    "holdings",
+}
+
+
+def _entity_tokens(name: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", name.casefold())
+        if token not in _ENTITY_STOP_WORDS and len(token) > 1
+    }
+
+
+def _company_identity_score(
+    *,
+    ticker: str,
+    report_entity: str | None,
+    facts_entity: str,
+) -> int:
+    """Rank Company Facts candidates by report-name identity before ticker reuse."""
+    facts_tokens = _entity_tokens(facts_entity)
+    if not facts_tokens:
+        return 0
+    overlap = len(_entity_tokens(report_entity) & facts_tokens) if report_entity is not None else 0
+    ticker_match = ticker.casefold() in facts_tokens
+    return overlap * 100 + int(ticker_match)
 
 
 def _historical_ciks(ticker: str, year: int, report_text: str) -> list[str]:
@@ -366,7 +458,7 @@ def _ordered_cik_candidates(
     current_cik: str | None,
     historical_ciks: list[str],
 ) -> list[str]:
-    """Prefer report identity, then the ticker mapping, then fuzzy historical search."""
+    """Prefer explicit identity, then current mapping, while retaining historical candidates."""
     candidates = [
         *([explicit_cik] if explicit_cik else []),
         *([current_cik] if current_cik else []),
@@ -515,7 +607,8 @@ def resolve_sec_kpis(ticker: str, year: int, report_text: str = "") -> dict[str,
         )
         if not cik_candidates:
             return {"status": "unavailable", "reason": "ticker_not_in_sec"}
-        best: tuple[str, dict[str, Any], dict[str, dict[str, Any]]] | None = None
+        report_entity = _registrant_name(report_text)
+        best: tuple[int, str, dict[str, Any], dict[str, dict[str, Any]]] | None = None
         for cik in cik_candidates:
             try:
                 facts = _cached_json(
@@ -525,12 +618,18 @@ def resolve_sec_kpis(ticker: str, year: int, report_text: str = "") -> dict[str,
             except (HTTPError, URLError, IncompleteRead, OSError, ValueError):
                 continue
             values = extract_sec_kpis(facts, year)
-            best = (cik, facts, values)
-            if values:
+            score = _company_identity_score(
+                ticker=ticker,
+                report_entity=report_entity,
+                facts_entity=str(facts.get("entityName", "")),
+            )
+            if values and (best is None or score > best[0]):
+                best = (score, cik, facts, values)
+            if values and score >= 100:
                 break
         if best is None:
             return {"status": "unavailable", "reason": "companyfacts_unavailable"}
-        cik, facts, values = best
+        identity_score, cik, facts, values = best
     except (
         HTTPError,
         URLError,
@@ -545,6 +644,7 @@ def resolve_sec_kpis(ticker: str, year: int, report_text: str = "") -> dict[str,
         "status": "success",
         "source": _FACTS_URL.format(cik=cik),
         "cik": cik,
+        "identity_score": identity_score,
         "fiscal_year": year,
         "values": values,
     }

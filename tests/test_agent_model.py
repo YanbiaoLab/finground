@@ -10,7 +10,6 @@ import finground.agents as agents_package
 from finground.agents.common import create_adk_model
 from finground.agents.kpi_specialists import (
     COMMON_TASK_AGENT_NAME,
-    KPI_AGENT_SPECS,
     KPI_DISPATCH_TOOL_NAME,
     MULTI_KPI_COORDINATOR_NAME,
     KpiSpecialistTool,
@@ -141,7 +140,6 @@ def test_multi_kpi_agent_exposes_one_compact_dispatcher_and_one_common_agent() -
     assert "Source priority" not in serialized_root_tools
     assert "Reject:" not in serialized_root_tools
     assert tuple(kpi_agent_name(kpi) for kpi in KPI_KEYS) == KPI_AGENT_NAMES
-    assert tuple(KPI_AGENT_SPECS) == KPI_KEYS
     assert "Do not inspect report text" in agent.instruction
     assert "Context isolation is intentional" in agent.instruction
     assert MULTI_KPI_MAX_OUTPUT_TOKENS == 4_096
@@ -164,8 +162,7 @@ def test_multi_kpi_agent_exposes_one_compact_dispatcher_and_one_common_agent() -
         specialist = agent_tool.agent
         assert specialist.name == kpi_agent_name(kpi)
         assert specialist.include_contents == "none"
-        assert f"only {kpi}" in specialist.description
-        assert KPI_AGENT_SPECS[kpi].source_priority in specialist.description
+        assert f"Independent {kpi} specialist" in specialist.description
         assert f"exactly one canonical KPI: {kpi}" in specialist.instruction
         assert "Do not find, judge, or record any other KPI" in specialist.instruction
         specialist_tool_names = {
@@ -205,6 +202,7 @@ def test_multi_kpi_budget_matches_multi_agent_topology() -> None:
 
 def test_requested_kpi_scope_supports_single_multiple_and_all() -> None:
     assert resolve_requested_kpis("Find revenue") == ["revenue"]
+    assert resolve_requested_kpis("Extract cost_of_revenue") == ["cost_of_revenue"]
     assert resolve_requested_kpis("Find net income and capital expenditures") == [
         "net_income",
         "capex",

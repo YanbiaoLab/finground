@@ -13,12 +13,10 @@ from finground.agents.kpi.base import (
     KPI_AGENT_NAME_PREFIX,
     KPI_SPECIALIST_MODEL_TURN_LIMIT,
     KPI_SPECIALIST_SEARCH_LIMIT,
-    KpiAgentSpec,
     kpi_agent_name,
 )
 from finground.agents.kpi.registry import (
     KPI_AGENT_FACTORIES,
-    KPI_AGENT_SPECS,
     create_kpi_specialist_agent,
 )
 from finground.kpis import KPI_KEYS
@@ -124,12 +122,10 @@ __all__ = [
     "COMMON_TASK_AGENT_NAME",
     "KPI_AGENT_FACTORIES",
     "KPI_AGENT_NAME_PREFIX",
-    "KPI_AGENT_SPECS",
     "KPI_DISPATCH_TOOL_NAME",
     "KPI_SPECIALIST_MODEL_TURN_LIMIT",
     "KPI_SPECIALIST_SEARCH_LIMIT",
     "MULTI_KPI_COORDINATOR_NAME",
-    "KpiAgentSpec",
     "KpiSpecialistTool",
     "create_kpi_specialist_agent",
     "kpi_agent_name",

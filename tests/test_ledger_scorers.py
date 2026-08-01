@@ -62,6 +62,7 @@ def test_cli_exposes_only_supported_ledger_commands() -> None:
     assert set(subparsers.choices) == {
         "ledger-kpi",
         "ledger-multi",
+        "ledger-select-kpi-samples",
         "ledger-score-kpi",
         "ledger-score-multi",
     }
