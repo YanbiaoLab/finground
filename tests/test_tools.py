@@ -96,9 +96,7 @@ def test_revenue_semantics_rejects_reit_components_and_bottom_line(label: str) -
 
 def test_interest_expense_semantics_accepts_printed_net_expense_subtotal() -> None:
     assert (
-        _semantic_row_error(
-            "interest_expense", "Interest expense, net of interest income", "found"
-        )
+        _semantic_row_error("interest_expense", "Interest expense, net of interest income", "found")
         is None
     )
     assert _semantic_row_error("interest_expense", "Net interest income", "found") is not None
@@ -460,6 +458,44 @@ def test_statement_page_unit_governs_each_split_html_table() -> None:
     )
 
     assert debt["unit_text"] == "(in thousands, except per-share amounts)"
+
+
+def test_primary_statement_continuation_inherits_previous_page_unit() -> None:
+    report = Report(
+        "NYSE_ACME_2023",
+        "NYSE",
+        "ACME",
+        2023,
+        """\
+## Consolidated Statements of Operations
+(In thousands)
+<table><tr><td></td><td>2023</td></tr>
+<tr><td>Net income</td><td>10,000</td></tr></table>
+<--- Page Split --->
+## Consolidated Statements of Cash Flows
+<table><tr><td></td><td>2023</td></tr>
+<tr><td>Preferred stock dividends paid</td><td>(17,832)</td></tr></table>
+""",
+    )
+    context = SimpleNamespace(
+        state={
+            "report": build_report_state(report),
+            SEC_FACTS_ENABLED_STATE_KEY: False,
+        },
+        actions=SimpleNamespace(skip_summarization=None),
+    )
+
+    prepare_multi_kpi_report(context)
+    result = read_report_pages([2], [], context)
+    dividend = next(
+        cell
+        for cell in result["pages"][0]["source_cells"]
+        if cell["row_label"] == "Preferred stock dividends paid"
+    )
+
+    assert dividend["unit_text"] == "(In thousands)"
+    assert dividend["unit_page"] == 1
+    assert dividend["unit_scope"] == "statement_continuation"
 
 
 def test_primary_statement_without_header_uses_first_value_as_report_year() -> None:

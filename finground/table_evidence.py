@@ -120,7 +120,8 @@ def _markdown_table_grids(page_text: str) -> list[list[list[str]]]:
     return tables
 
 
-def _page_unit_text(page_text: str) -> str | None:
+def extract_page_unit_text(page_text: str) -> str | None:
+    """Return exact visible unit text governing tables on one report page."""
     match = _UNIT_LINE_RE.search(page_text[:4_000])
     return _visible_text(match.group()) if match is not None else None
 
@@ -128,7 +129,7 @@ def _page_unit_text(page_text: str) -> str | None:
 def _html_table_unit_texts(page_text: str) -> list[str | None]:
     """Return the nearest governing unit text for each HTML table."""
     units: list[str | None] = []
-    page_unit = _page_unit_text(page_text)
+    page_unit = extract_page_unit_text(page_text)
     previous_table_end = 0
     for table_match in _HTML_TABLE_RE.finditer(page_text):
         prefix_start = max(previous_table_end, table_match.start() - 2_000)
@@ -297,7 +298,7 @@ def extract_source_cells(
     html_units = _html_table_unit_texts(page_text)
     tables = [
         *((table, html_units[index]) for index, table in enumerate(html_tables)),
-        *((table, _page_unit_text(page_text)) for table in _markdown_table_grids(page_text)),
+        *((table, extract_page_unit_text(page_text)) for table in _markdown_table_grids(page_text)),
     ]
     for table_index, (table, unit_text) in enumerate(tables):
         for row_index, row in enumerate(table):

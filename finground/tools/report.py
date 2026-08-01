@@ -16,7 +16,7 @@ from finground.sec_facts import (
     SEC_FACTS_STATE_KEY,
     resolve_sec_kpis,
 )
-from finground.table_evidence import extract_source_cells
+from finground.table_evidence import extract_page_unit_text, extract_source_cells
 
 MAX_SEARCH_RESULTS = 8
 MAX_READ_PAGES = 3
@@ -308,6 +308,33 @@ def _inherit_document_unit(
     ]
 
 
+def _inherit_previous_page_unit(
+    cells: list[dict[str, Any]],
+    *,
+    page_number: int,
+    pages_by_number: dict[int, Page],
+    primary_page_numbers: set[int],
+) -> list[dict[str, Any]]:
+    """Carry a primary statement's printed unit onto its adjacent continuation page."""
+    if page_number not in primary_page_numbers or page_number - 1 not in primary_page_numbers:
+        return cells
+    previous_page = pages_by_number.get(page_number - 1)
+    unit_text = extract_page_unit_text(previous_page.text) if previous_page is not None else None
+    if unit_text is None:
+        return cells
+    return [
+        {
+            **cell,
+            "unit_text": unit_text,
+            "unit_page": page_number - 1,
+            "unit_scope": "statement_continuation",
+        }
+        if cell.get("unit_text") is None
+        else cell
+        for cell in cells
+    ]
+
+
 def _has_statement_title(page_text: str, terms: tuple[str, ...]) -> bool:
     table_start = page_text.casefold().find("<table")
     title_end = table_start if 0 <= table_start <= 2_000 else 1_200
@@ -474,16 +501,27 @@ def prepare_multi_kpi_report(tool_context: ToolContext) -> dict:
     state_pages = [
         Page(raw_index=int(page["raw_index"]), text=str(page["text"])) for page in report_pages
     ]
+    pages_by_number = {page.display_number: page for page in state_pages}
+    primary_page_numbers = {
+        page_number
+        for page_numbers in result.get("statement_pages", {}).values()
+        for page_number in page_numbers
+    }
     document_unit = _document_unit_evidence(state_pages)
     tool_context.state[MULTI_KPI_DOCUMENT_UNIT_STATE_KEY] = document_unit
     for page in report_pages:
         page_number = int(page.get("display_number", 0))
         for cell in _inherit_document_unit(
-            extract_source_cells(
-                str(page.get("text", "")),
+            _inherit_previous_page_unit(
+                extract_source_cells(
+                    str(page.get("text", "")),
+                    page_number=page_number,
+                    fiscal_year=int(result.get("fiscal_year", 0)),
+                    allow_implicit_year=False,
+                ),
                 page_number=page_number,
-                fiscal_year=int(result.get("fiscal_year", 0)),
-                allow_implicit_year=False,
+                pages_by_number=pages_by_number,
+                primary_page_numbers=primary_page_numbers,
             ),
             document_unit,
         ):
@@ -504,6 +542,10 @@ def prepare_multi_kpi_report(tool_context: ToolContext) -> dict:
     # current maturities.
     if isinstance(sec_facts.get("values"), dict):
         sec_facts["values"].pop("short_term_borrowings", None)
+        if sec_facts["values"].get("dividends_paid", {}).get("value") == 0:
+            # A common-stock zero can coexist with a printed consolidated NCI or
+            # preferred dividend. Let the independent specialist inspect that waterfall.
+            sec_facts["values"].pop("dividends_paid", None)
     tool_context.state[SEC_FACTS_STATE_KEY] = sec_facts
     compact = {
         "status": "success",
@@ -922,11 +964,16 @@ def read_report_pages(
         raw_document_unit = tool_context.state.get(MULTI_KPI_DOCUMENT_UNIT_STATE_KEY)
         document_unit = raw_document_unit if isinstance(raw_document_unit, dict) else None
         page_source_cells = _inherit_document_unit(
-            extract_source_cells(
-                page_text,
+            _inherit_previous_page_unit(
+                extract_source_cells(
+                    page_text,
+                    page_number=number,
+                    fiscal_year=fiscal_year,
+                    allow_implicit_year=number in primary_page_numbers,
+                ),
                 page_number=number,
-                fiscal_year=fiscal_year,
-                allow_implicit_year=number in primary_page_numbers,
+                pages_by_number=by_number,
+                primary_page_numbers=primary_page_numbers,
             ),
             document_unit,
         )
