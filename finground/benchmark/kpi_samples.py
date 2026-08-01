@@ -15,6 +15,27 @@ def _visible_text(text: str) -> str:
     return " ".join(re.sub(r"<[^>]+>", " ", unescape(text)).split()).casefold()
 
 
+def _label_text(text: str) -> str:
+    return " ".join(re.sub(r"[^\w&]+", " ", text).split())
+
+
+def _evidence_lines(text: str) -> tuple[str, ...]:
+    """Return individual table rows and prose lines instead of one document blob."""
+    html_rows = re.findall(r"<tr\b[^>]*>.*?</tr>", text, flags=re.IGNORECASE | re.DOTALL)
+    without_html_rows = re.sub(
+        r"<tr\b[^>]*>.*?</tr>", "\n", text, flags=re.IGNORECASE | re.DOTALL
+    )
+    candidates = [*html_rows, *without_html_rows.splitlines()]
+    return tuple(visible for item in candidates if (visible := _visible_text(item)))
+
+
+def _contains_printed_value(text: str, tokens: tuple[str, ...]) -> bool:
+    return any(
+        re.search(rf"(?<![\d.]){re.escape(token.casefold())}(?![\d.])", text)
+        for token in tokens
+    )
+
+
 def _printed_value_tokens(value: float) -> tuple[str, ...]:
     """Return exact printable forms at common LEDGER statement scales."""
     absolute = abs(value)
@@ -37,7 +58,7 @@ def select_grounded_report_ids(
     limit: int,
     max_per_ticker: int = 1,
 ) -> list[str]:
-    """Select reports whose KPI value and a canonical label are visible in report text."""
+    """Select reports with a KPI label and value grounded in one evidence line."""
     if kpi not in KPI_KEYS:
         raise ValueError(f"unknown KPI: {kpi}")
     if limit < 1:
@@ -45,17 +66,20 @@ def select_grounded_report_ids(
     if max_per_ticker < 1:
         raise ValueError("max_per_ticker must be at least 1")
     columns = (*REPORT_COLUMNS, kpi)
-    labels = tuple(alias.casefold() for alias in KPI_ALIASES[kpi])
+    labels = tuple(_label_text(_visible_text(alias)) for alias in KPI_ALIASES[kpi])
     selected: list[str] = []
     ticker_counts: dict[str, int] = {}
     for row in iter_parquet_rows(parquet_path, columns, batch_size=32):
         raw_value = row.get(kpi)
         if not isinstance(raw_value, int | float) or not math.isfinite(float(raw_value)):
             continue
-        visible = _visible_text(str(row["mmd_text"]))
-        if not any(label in visible for label in labels):
-            continue
-        if not any(token.casefold() in visible for token in _printed_value_tokens(float(raw_value))):
+        value_tokens = _printed_value_tokens(float(raw_value))
+        evidence_lines = _evidence_lines(str(row["mmd_text"]))
+        if not any(
+            any(label in _label_text(line) for label in labels)
+            and _contains_printed_value(line, value_tokens)
+            for line in evidence_lines
+        ):
             continue
         ticker = str(row["ticker"])
         if ticker_counts.get(ticker, 0) >= max_per_ticker:

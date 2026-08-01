@@ -1054,22 +1054,66 @@ def _expand_source_backed_candidates(
             expanded.append(_INVALID_SOURCE_CANDIDATE)
             continue
         unit_text = source.get("unit_text")
+        unit_page = source.get("unit_page", source["page"]) if unit_text is not None else None
+        if unit_text is None and source_status == "found":
+            try:
+                source_number = parse_financial_number(str(source.get("value_verbatim", "")))
+            except ValueError:
+                source_number = math.nan
+            for corroborating_source in source_cells.values():
+                if not isinstance(corroborating_source, dict):
+                    continue
+                corroborating_unit = corroborating_source.get("unit_text")
+                if (
+                    corroborating_unit is None
+                    or corroborating_source.get("fiscal_year") != source.get("fiscal_year")
+                    or corroborating_source.get("status") != source_status
+                    or _semantic_row_error(
+                        kpi,
+                        str(corroborating_source.get("row_label", "")),
+                        str(source_status),
+                        None,
+                    )
+                    is not None
+                ):
+                    continue
+                try:
+                    corroborating_number = parse_financial_number(
+                        str(corroborating_source.get("value_verbatim", ""))
+                    )
+                except ValueError:
+                    continue
+                if math.isclose(
+                    abs(source_number),
+                    abs(corroborating_number),
+                    rel_tol=1e-12,
+                    abs_tol=1e-12,
+                ):
+                    unit_text = corroborating_unit
+                    unit_page = corroborating_source.get(
+                        "unit_page", corroborating_source.get("page")
+                    )
+                    break
         if (
             unit_text is None
             and source_status != "explicit_zero"
             and kpi not in {"eps_basic", "eps_diluted", "shares_outstanding"}
         ):
-            errors.append(
-                {
-                    "field": f"kpis.{index}.source_id",
-                    "message": (
-                        "monetary source cells require traceable local or document-level "
-                        "unit text; use a different source or record ambiguous"
-                    ),
-                }
+            visible_header_scale = detect_scale(
+                page_text_by_number.get(source.get("page"), "")[:2_000], kpi
             )
-            expanded.append(_INVALID_SOURCE_CANDIDATE)
-            continue
+            if visible_header_scale in {"thousands", "millions", "billions"}:
+                errors.append(
+                    {
+                        "field": f"kpis.{index}.source_id",
+                        "message": (
+                            f"source page indicates {visible_header_scale} but the source cell "
+                            "has no traceable unit text"
+                        ),
+                    }
+                )
+                expanded.append(_INVALID_SOURCE_CANDIDATE)
+                continue
         unit_scale = _detected_unit_scale(kpi, unit_text)
         if unit_scale == "unknown":
             unit_scale = "units"
@@ -1091,9 +1135,7 @@ def _expand_source_backed_candidates(
                 "value_verbatim": source["value_verbatim"],
                 "unit_scale": unit_scale,
                 "unit_text": unit_text,
-                "unit_page": source.get("unit_page", source["page"])
-                if unit_text is not None
-                else None,
+                "unit_page": unit_page,
                 "page": source["page"],
                 "statement": source_statement(
                     raw_candidate.get("statement"),

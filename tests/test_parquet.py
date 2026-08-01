@@ -88,3 +88,27 @@ def test_grounded_kpi_selector_requires_visible_label_and_value(tmp_path: Path) 
     )
 
     assert select_grounded_report_ids(path, kpi="revenue", limit=2) == ["NYSE_MATCH_2023"]
+
+
+def test_grounded_kpi_selector_requires_label_and_value_in_same_evidence_line(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "multi.parquet"
+    _write_parquet(
+        path,
+        {
+            "ticker": ["FALSE_MATCH", "TRUE_MATCH", "PARTIAL_NUMBER"],
+            "exchange": ["NYSE", "NYSE", "NYSE"],
+            "year": [2023, 2023, 2023],
+            "mmd_text": [
+                "| Short-term borrowings | 10 |\n| Derivative liabilities | 5.644 |",
+                "<table><tr><td>Short-term borrowings</td><td>5.644</td></tr></table>",
+                "| Short-term borrowings | 151 |",
+            ],
+            "short_term_borrowings": [5_644_000.0, 5_644_000.0, 51_000_000.0],
+        },
+    )
+
+    assert select_grounded_report_ids(path, kpi="short_term_borrowings", limit=3) == [
+        "NYSE_TRUE_MATCH_2023"
+    ]

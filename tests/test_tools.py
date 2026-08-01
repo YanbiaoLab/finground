@@ -680,6 +680,100 @@ def test_source_backed_explicit_zero_does_not_require_unit_text() -> None:
     assert context.state[MULTI_KPI_WORK_RECORD_STATE_KEY]["kpis"][0]["value"] == 0.0
 
 
+def test_source_backed_monetary_value_defaults_to_units_without_scale_header() -> None:
+    report = Report(
+        "NASDAQ_ACME_2023",
+        "NASDAQ",
+        "ACME",
+        2023,
+        """\
+## Consolidated Balance Sheets
+<table><tr><td>Year ended</td><td>2023</td><td>2022</td></tr>
+<tr><td>Line of credit</td><td>$ 16,914,594</td><td>$ 6,482,848</td></tr></table>
+""",
+    )
+    context = SimpleNamespace(
+        state={"report": build_report_state(report)},
+        actions=SimpleNamespace(skip_summarization=None),
+    )
+    read_result = read_report_pages([1], [], context)
+    source_cell = next(
+        cell
+        for cell in read_result["pages"][0]["source_cells"]
+        if cell["row_label"] == "Line of credit"
+    )
+
+    result = record_multi_kpi_progress(
+        "USD",
+        "No scale stated; values are actual dollars",
+        [
+            {
+                "kpi": "short_term_borrowings",
+                "fiscal_year": 2023,
+                "status": "found",
+                "source_id": source_cell["source_id"],
+            }
+        ],
+        [],
+        context,
+    )
+
+    assert result["status"] == "success"
+    recorded = context.state[MULTI_KPI_WORK_RECORD_STATE_KEY]["kpis"][0]
+    assert recorded["unit_scale"] == "units"
+    assert recorded["value"] == 16_914_594
+
+
+def test_source_backed_value_inherits_scale_from_corroborating_source_cell() -> None:
+    report = Report(
+        "NYSE_ACME_2023",
+        "NYSE",
+        "ACME",
+        2023,
+        """\
+## Consolidated Balance Sheets
+<table><tr><td>Year ended</td><td>2023</td></tr>
+<tr><td>Borrowings due within one year</td><td>243</td></tr></table>
+<--- Page Split --->
+## Debt note
+(Dollars in millions)
+<table><tr><td>Year ended</td><td>2023</td></tr>
+<tr><td>Short-term borrowings</td><td>243</td></tr></table>
+""",
+    )
+    context = SimpleNamespace(
+        state={"report": build_report_state(report)},
+        actions=SimpleNamespace(skip_summarization=None),
+    )
+    read_result = read_report_pages([1, 2], [], context)
+    source_cell = next(
+        cell
+        for cell in read_result["pages"][0]["source_cells"]
+        if cell["row_label"] == "Borrowings due within one year"
+    )
+
+    result = record_multi_kpi_progress(
+        "USD",
+        "Dollars in millions",
+        [
+            {
+                "kpi": "short_term_borrowings",
+                "fiscal_year": 2023,
+                "status": "found",
+                "source_id": source_cell["source_id"],
+            }
+        ],
+        [],
+        context,
+    )
+
+    assert result["status"] == "success"
+    recorded = context.state[MULTI_KPI_WORK_RECORD_STATE_KEY]["kpis"][0]
+    assert recorded["unit_text"] == "(Dollars in millions)"
+    assert recorded["unit_page"] == 2
+    assert recorded["value"] == 243_000_000
+
+
 def test_search_report_combines_ranked_and_exact_phrase_search() -> None:
     result = search_report(
         "",
