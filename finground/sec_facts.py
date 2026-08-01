@@ -278,7 +278,12 @@ def _registrant_name(text: str) -> str | None:
     )
     if plain_report_title:
         candidate = plain_report_title.group(1).strip(" #:-")
-        if candidate.casefold() not in {"annual", "financial", "working together"}:
+        if candidate.casefold() not in {
+            "annual",
+            "financial",
+            "future",
+            "working together",
+        }:
             return candidate
     ticker_cover_name = re.search(
         r"(?m)^([A-Z][A-Z &'.-]{2,60})\s*\n"

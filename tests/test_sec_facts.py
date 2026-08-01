@@ -154,6 +154,19 @@ Central Garden & Pet Company
     assert _registrant_name(text) == "Central Garden & Pet Company"
 
 
+def test_report_identity_prefers_exact_registrant_over_marketing_annual_title() -> None:
+    text = """\
+FUTURE
+
+2017 ANNUAL REPORT
+
+# HELIX ENERGY SOLUTIONS GROUP, INC.
+(Exact name of registrant as specified in its charter)
+"""
+
+    assert _registrant_name(text) == "HELIX ENERGY SOLUTIONS GROUP, INC."
+
+
 def test_report_identity_prefers_mda_company_over_cover_slogan() -> None:
     text = """\
 ## BUILDING

@@ -431,6 +431,37 @@ def test_apostrophe_thousands_in_table_header_is_traceable_unit_evidence() -> No
     assert revenue["unit_text"] == "'000"
 
 
+def test_statement_page_unit_governs_each_split_html_table() -> None:
+    report = Report(
+        "NASDAQ_ACME_2023",
+        "NASDAQ",
+        "ACME",
+        2023,
+        """\
+## Consolidated Balance Sheets
+(in thousands, except per-share amounts)
+<table><tr><td>Assets</td><td>2023</td></tr>
+<tr><td>Total assets</td><td>100,000</td></tr></table>
+<p>Liabilities and equity</p>
+<table><tr><td>Liabilities</td><td>2023</td></tr>
+<tr><td>Total long-term debt</td><td>36,004</td></tr></table>
+""",
+    )
+    context = SimpleNamespace(
+        state={"report": build_report_state(report)},
+        actions=SimpleNamespace(skip_summarization=None),
+    )
+
+    result = read_report_pages([1], [], context)
+    debt = next(
+        cell
+        for cell in result["pages"][0]["source_cells"]
+        if cell["row_label"] == "Total long-term debt"
+    )
+
+    assert debt["unit_text"] == "(in thousands, except per-share amounts)"
+
+
 def test_primary_statement_without_header_uses_first_value_as_report_year() -> None:
     report = Report(
         "NASDAQ_ACME_2023",

@@ -128,15 +128,16 @@ def _page_unit_text(page_text: str) -> str | None:
 def _html_table_unit_texts(page_text: str) -> list[str | None]:
     """Return the nearest governing unit text for each HTML table."""
     units: list[str | None] = []
+    page_unit = _page_unit_text(page_text)
     previous_table_end = 0
     for table_match in _HTML_TABLE_RE.finditer(page_text):
-        prefix_start = max(previous_table_end, table_match.start() - 800)
+        prefix_start = max(previous_table_end, table_match.start() - 2_000)
         prefix = unescape(page_text[prefix_start : table_match.start()])
         table_header = unescape(table_match.group()[:1_000])
         prefix_matches = list(_UNIT_LINE_RE.finditer(prefix))
         header_match = _UNIT_LINE_RE.search(table_header)
         match = header_match or (prefix_matches[-1] if prefix_matches else None)
-        units.append(_visible_text(match.group()) if match is not None else None)
+        units.append(_visible_text(match.group()) if match is not None else page_unit)
         previous_table_end = table_match.end()
     return units
 
