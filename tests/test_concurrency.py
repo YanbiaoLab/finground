@@ -120,7 +120,7 @@ def test_multi_runner_applies_concurrency_limit(tmp_path: Path, monkeypatch) -> 
     assert metadata["llm_call_limit"] == 200
     assert metadata["search_call_limit_per_specialist"] == 2
     assert metadata["adk_run_call_limit"] == 200
-    assert metadata["prompt_version"] == "independent-kpi-agents-v37"
+    assert metadata["prompt_version"] == "independent-kpi-agents-v38"
     assert metadata["ok"] == 4
     assert metadata["incomplete"] == 0
     assert metadata["submission_deadline"] == 200

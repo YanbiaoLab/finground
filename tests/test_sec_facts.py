@@ -115,6 +115,19 @@ Barnwell Industries, Inc.
     assert _registrant_name(text) == "Barnwell Industries, Inc."
 
 
+def test_report_identity_reads_company_before_annual_report_and_accounts() -> None:
+    text = """\
+![](cover.jpg)
+
+CORE LABORATORIES N.V.
+
+ANNUAL REPORT AND ACCOUNTS
+December 31, 2019
+"""
+
+    assert _registrant_name(text) == "CORE LABORATORIES N.V."
+
+
 def test_report_identity_uses_early_company_heading_before_later_legal_names() -> None:
     text = """\
 Working Together

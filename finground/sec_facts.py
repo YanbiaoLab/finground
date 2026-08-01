@@ -273,7 +273,7 @@ def _registrant_name(text: str) -> str | None:
     cover = text[:40_000]
     plain_report_title = re.search(
         r"(?im)^\s*([A-Z][^\n]{2,100}?)\s*(?:\r?\n){1,3}\s*"
-        r"\d{4}\s+Annual Report\s*$",
+        r"(?:\d{4}\s+Annual Report|Annual Report(?: and Accounts)?)\s*$",
         cover[:2_000],
     )
     if plain_report_title:
