@@ -126,6 +126,10 @@ def test_sga_structural_check_rejects_shifted_operating_expense_rows() -> None:
         _structural_evidence_error("sga_expense", "General and administrative expenses", page)
         is not None
     )
+    assert (
+        _structural_evidence_error("rd_expense", "Research and development expenses", page)
+        is not None
+    )
 
 
 def test_capex_semantics_rejects_property_additions_without_cash_flow_context() -> None:
@@ -138,6 +142,30 @@ def test_report_state_contains_document_pages() -> None:
     assert state["report_id"] == "NYSE_ACME_2023"
     assert len(state["pages"]) == 3
     assert "| Revenue | 1,234 | 1,100 |" in state["pages"][2]["text"]
+
+
+def test_search_snippet_centers_complete_phrase_after_long_common_word_context() -> None:
+    report = Report(
+        "NASDAQ_ACME_2023",
+        "NASDAQ",
+        "ACME",
+        2023,
+        "A and B " * 400 + "\nResearch and development costs totaled $23.1 million in 2023.",
+    )
+    context = SimpleNamespace(
+        state={"report": build_report_state(report)},
+        actions=SimpleNamespace(skip_summarization=None),
+    )
+
+    result = search_report(
+        "research and development",
+        ["research and development"],
+        2023,
+        5,
+        context,
+    )
+
+    assert "$23.1 million" in result["results"][0]["snippet"]
 
 
 def test_get_report_info_returns_page_count_and_bounded_outline() -> None:

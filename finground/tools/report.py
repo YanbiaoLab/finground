@@ -702,7 +702,7 @@ def _search_snippet(text: str, query: str, phrases: list[str]) -> str:
     snippet = "\n...\n".join(chunk for chunk in ("\n".join(header), "\n".join(window)) if chunk)
     return _truncate_around_match(
         snippet.strip(),
-        [*phrases, *query_tokens],
+        [*phrases, query],
         MAX_SEARCH_SNIPPET_CHARS,
     )
 

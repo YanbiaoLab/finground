@@ -134,8 +134,10 @@ def _normalized_source_text(text: str) -> str:
 
 def _structural_evidence_error(kpi: str, line_label: str, page_text: str) -> str | None:
     """Reject a known row-shift shape instead of trusting mislabeled OCR cells."""
-    if kpi != "sga_expense" or "general and administrative" not in _normalized_source_text(
-        line_label
+    normalized_label = _normalized_source_text(line_label)
+    if not (
+        (kpi == "sga_expense" and "general and administrative" in normalized_label)
+        or (kpi == "rd_expense" and "research and development" in normalized_label)
     ):
         return None
     rows = [
@@ -1052,7 +1054,7 @@ def _expand_source_backed_candidates(
         raw_kpi = raw_candidate.get("kpi")
         source_page_text = page_text_by_number.get(source.get("page"), "")
         if (
-            raw_kpi == "sga_expense"
+            raw_kpi in {"sga_expense", "rd_expense"}
             and _structural_evidence_error(
                 raw_kpi, str(source.get("row_label", "")), source_page_text
             )

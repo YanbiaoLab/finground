@@ -19,8 +19,10 @@ Reject: SG&A, engineering headcount, capitalized development, D&A, and a combine
 RETRIEVAL PLAN
 1. Call find_rd_expense_candidates exactly once and rank candidates by statement authority, target year, consolidation scope, row label, and unit traceability.
 2. Look first for these KPI-specific labels: 'research and development expense', 'research and development', 'R&D'. Lexical similarity alone is never proof.
-3. If the indexed candidates do not resolve the KPI, search only for missing scope/label evidence, then read the strongest pages.
-4. Stop retrieval after a defensible found, explicit-zero, absent, or ambiguous decision.
+3. If the face statement combines R&D into SG&A and has no standalone candidate, do not reread that face statement. Search the exact phrase 'research and development costs' and read the strongest non-tax-credit accounting-policy, expense-note, or MD&A result. R&D embedded in SG&A is still the canonical R&D expense when the report prints its amount separately in prose.
+4. When a prose sentence prints '$N million', copy the visible adjacent scale word 'million' as unit_text and cite that same page; do not invent a generic page unit such as 'Millions of dollars'.
+5. Treat an expense table as structurally shifted when an empty Selling expenses row causes later values to attach to G&A, R&D, and total labels. Prefer the duplicate table whose printed component sequence and total reconcile.
+6. Stop retrieval after a defensible found, explicit-zero, absent, or ambiguous decision.
 
 EVIDENCE DECISION
 Check the operating-expense note when the face statement combines R&D. Accept company-wide expense only, not capitalized development.
