@@ -591,10 +591,13 @@ def _candidate_score(kpi: str, cell: dict[str, Any], aliases: tuple[str, ...]) -
             ).casefold(),
         )
     )
-    if kpi in {"eps_basic", "eps_diluted", "shares_outstanding"} and (
-        "weighted average" in prior_context
-    ):
+    if kpi in {"eps_basic", "eps_diluted"} and "weighted average" in prior_context:
         return 0
+    if kpi == "shares_outstanding" and "weighted average" in context:
+        if "diluted" in row_label and "shares outstanding" in row_label:
+            return 120
+        if "basic" in row_label and "shares outstanding" in row_label:
+            return 110
     if kpi == "depreciation_amortization" and "accumulated depreciation" in row_label:
         return 0
     if kpi == "revenue" and any(

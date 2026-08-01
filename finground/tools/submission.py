@@ -303,8 +303,7 @@ def _semantic_row_error(
     if kpi == "gross_profit" and re.search(r"(?:%|percent|percentage)", label):
         return "gross_profit requires a monetary amount, not a margin percentage"
     if kpi == "interest_expense" and (
-        "interest rate" in label
-        or ("interest income" in label and "interest expense" not in label)
+        "interest rate" in label or ("interest income" in label and "interest expense" not in label)
     ):
         return "interest_expense excludes interest income and interest rates"
     if kpi == "income_tax_expense" and "income taxes paid" in label:
@@ -366,13 +365,8 @@ def _semantic_row_error(
     ):
         return "income_tax_expense requires the total tax expense/benefit, not one tax component"
 
-    if kpi == "shares_outstanding":
-        if "weighted average" in label or "weighted-average" in label:
-            return (
-                "shares_outstanding requires a period-end share count, not weighted-average shares"
-            )
-        if "authorized" in label and "outstanding" not in label:
-            return "authorized shares are not shares outstanding"
+    if kpi == "shares_outstanding" and "authorized" in label and "outstanding" not in label:
+        return "authorized shares are not shares outstanding"
 
     if kpi in {"accounts_receivable", "accounts_payable"}:
         is_party_component = "related parties" in label or "unrelated parties" in label
@@ -1097,13 +1091,9 @@ def _expand_source_backed_candidates(
                         raw_kpi == "net_income"
                         and (
                             "attributable to parent"
-                            not in _normalized_source_text(
-                                str(alternative.get("row_label", ""))
-                            )
+                            not in _normalized_source_text(str(alternative.get("row_label", "")))
                             or "per share"
-                            in _normalized_source_text(
-                                str(alternative.get("row_label", ""))
-                            )
+                            in _normalized_source_text(str(alternative.get("row_label", "")))
                         )
                     )
                     or _semantic_row_error(

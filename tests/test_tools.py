@@ -652,6 +652,49 @@ def test_period_end_share_count_is_extracted_from_verbose_balance_sheet_label() 
     assert context.state[MULTI_KPI_WORK_RECORD_STATE_KEY]["kpis"][0]["value"] == 55_831_549
 
 
+def test_diluted_weighted_share_candidate_outranks_cover_count() -> None:
+    report = Report(
+        "NYSE_ACME_2023",
+        "NYSE",
+        "ACME",
+        2023,
+        """\
+As of February 20, 2024, there were 5,600,000 common shares outstanding.
+<--- Page Split --->
+## Earnings per share
+(shares in thousands, except per share amounts)
+<table><tr><td></td><td>2023</td></tr>
+<tr><td>Basic - weighted average shares outstanding</td><td>5,577</td></tr>
+<tr><td>Diluted - weighted average shares outstanding</td><td>5,579</td></tr></table>
+""",
+    )
+    context = SimpleNamespace(
+        state={"report": build_report_state(report), SEC_FACTS_ENABLED_STATE_KEY: False},
+        actions=SimpleNamespace(skip_summarization=None),
+    )
+
+    candidates = find_kpi_source_candidates("shares_outstanding", context)["candidates"]
+
+    assert candidates[0]["row_label"] == "Diluted - weighted average shares outstanding"
+    assert candidates[0]["value_verbatim"] == "5,579"
+    recorded = record_multi_kpi_progress(
+        None,
+        None,
+        [
+            {
+                "kpi": "shares_outstanding",
+                "fiscal_year": 2023,
+                "status": "found",
+                "source_id": candidates[0]["source_id"],
+            }
+        ],
+        [],
+        context,
+    )
+    assert recorded["status"] == "success"
+    assert context.state[MULTI_KPI_WORK_RECORD_STATE_KEY]["kpis"][0]["value"] == 5_579_000
+
+
 def test_finalization_applies_ledger_aligned_gross_profit_identity() -> None:
     context = _context()
     context.state[MULTI_KPI_REQUESTED_STATE_KEY] = ["gross_profit"]
