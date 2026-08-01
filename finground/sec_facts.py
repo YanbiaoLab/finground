@@ -519,9 +519,15 @@ def _pick(entries: list[dict[str, Any]], year: int, kind: str) -> dict[str, Any]
     if not candidates:
         return None
     key = (
-        (lambda item: item.get("filed", ""))
+        (lambda item: (item.get("fy") == year, item.get("filed", "")))
         if kind == "flow"
-        else (lambda item: (item.get("end", ""), item.get("filed", "")))
+        else (
+            lambda item: (
+                item.get("fy") == year,
+                item.get("end", ""),
+                item.get("filed", ""),
+            )
+        )
     )
     return max(candidates, key=key)
 

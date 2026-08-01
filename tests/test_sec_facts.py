@@ -49,6 +49,30 @@ def test_sec_flow_rejects_quarter_duration() -> None:
     assert "net_income" not in extract_sec_kpis(facts, 2017)
 
 
+def test_sec_flow_prefers_fact_from_target_year_filing_over_later_comparative() -> None:
+    original = {
+        **_fact(50_153_000, start="2017-01-01"),
+        "fy": 2017,
+        "filed": "2018-03-29",
+    }
+    later_comparative = {
+        **_fact(48_899_000, start="2017-01-01"),
+        "fy": 2018,
+        "filed": "2019-03-28",
+    }
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "NetCashProvidedByUsedInOperatingActivities": {
+                    "units": {"USD": [original, later_comparative]}
+                }
+            }
+        }
+    }
+
+    assert extract_sec_kpis(facts, 2017)["operating_cash_flow"]["value"] == 50_153_000
+
+
 def test_sec_waterfall_does_not_use_noncanonical_concept_fallbacks() -> None:
     facts = {
         "facts": {
