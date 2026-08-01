@@ -1,2 +1,0 @@
-# Primary-statement candidate isolation regression.
-NASDAQ_DWSN_2017

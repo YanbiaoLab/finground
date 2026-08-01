@@ -1,3 +1,0 @@
-# P0 workflow regression: glossy-report loop plus normal long-report path.
-NASDAQ_APA_2017
-NASDAQ_ORLY_2017

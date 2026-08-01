@@ -97,16 +97,6 @@ async def extract_ledger_answer(
     return ReportExtraction.model_validate(json.loads(final_text))
 
 
-def extract_ledger_answer_sync(
-    answer: str,
-    *,
-    ticker: str,
-    model_name: str | None = None,
-) -> ReportExtraction:
-    """Synchronous wrapper used by benchmark commands."""
-    return asyncio.run(extract_ledger_answer(answer, ticker=ticker, model_name=model_name))
-
-
 async def extract_output_answers(
     *,
     output_dir: Path,
