@@ -883,6 +883,61 @@ def test_source_backed_sga_repairs_shifted_row_to_intact_duplicate() -> None:
     assert recorded["value"] == 19_761_000
 
 
+def test_source_backed_net_income_repairs_shifted_row_to_intact_duplicate() -> None:
+    report = Report(
+        "NASDAQ_ACME_2023",
+        "NASDAQ",
+        "ACME",
+        2023,
+        """\
+## Consolidated Statements of Income
+(In thousands of USD)
+<table><tr><td>Year ended</td><td>2023</td></tr>
+<tr><td>Net income attributable to non-controlling interest</td><td>(18,639)</td></tr>
+<tr><td>Net (loss)/income attributable to parent company's common shareholders</td><td>707</td></tr>
+<tr><td>Net (loss)/income attributable to parent company's common shareholders per share - Basic</td><td>(19,346)</td></tr>
+<tr><td>Diluted</td><td>(0.61)</td></tr></table>
+<--- Page Split --->
+## Consolidated Statements of Changes in Stockholders' Equity
+(In thousands of USD)
+<table><tr><td>Year ended</td><td>2023</td></tr>
+<tr><td>Net (loss)/income attributable to parent company</td><td>(19,346)</td></tr></table>
+""",
+    )
+    context = SimpleNamespace(
+        state={"report": build_report_state(report)},
+        actions=SimpleNamespace(skip_summarization=None),
+    )
+    read_result = read_report_pages([1, 2], [], context)
+    shifted_source = next(
+        cell
+        for cell in read_result["pages"][0]["source_cells"]
+        if cell["row_label"]
+        == "Net (loss)/income attributable to parent company's common shareholders"
+    )
+
+    result = record_multi_kpi_progress(
+        "USD",
+        "In thousands of USD",
+        [
+            {
+                "kpi": "net_income",
+                "fiscal_year": 2023,
+                "status": "found",
+                "value_verbatim": "707",
+                "source_id": shifted_source["source_id"],
+            }
+        ],
+        [],
+        context,
+    )
+
+    assert result["status"] == "success"
+    recorded = context.state[MULTI_KPI_WORK_RECORD_STATE_KEY]["kpis"][0]
+    assert recorded["page"] == 2
+    assert recorded["value"] == -19_346_000
+
+
 def test_search_report_combines_ranked_and_exact_phrase_search() -> None:
     result = search_report(
         "",

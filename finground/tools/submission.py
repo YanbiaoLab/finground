@@ -138,6 +138,11 @@ def _structural_evidence_error(kpi: str, line_label: str, page_text: str) -> str
     if not (
         (kpi == "sga_expense" and "general and administrative" in normalized_label)
         or (kpi == "rd_expense" and "research and development" in normalized_label)
+        or (
+            kpi == "net_income"
+            and "attributable to parent" in normalized_label
+            and "per share" not in normalized_label
+        )
     ):
         return None
     rows = [
@@ -148,6 +153,19 @@ def _structural_evidence_error(kpi: str, line_label: str, page_text: str) -> str
         for row_match in _HTML_ROW_RE.finditer(page_text)
     ]
     for index, cells in enumerate(rows):
+        if (
+            kpi == "net_income"
+            and len(cells) >= 2
+            and cells[0] == normalized_label
+            and index + 1 < len(rows)
+            and rows[index + 1]
+            and rows[index + 1][0].startswith(normalized_label)
+            and "per share" in rows[index + 1][0]
+        ):
+            return (
+                "source table has a parent-attributable net-income row followed by a duplicated "
+                "per-share label with a monetary-sized value; use an intact duplicate disclosure"
+            )
         if (
             len(cells) >= 2
             and cells[0] == "selling expenses"
@@ -222,6 +240,7 @@ def _semantic_row_error(
         ),
         "net_income": (
             r"\bnet (?:income|loss|earnings)\b",
+            r"\bnet \(loss\)/income\b",
             r"\bprofit (?:for the year|attributable)\b",
             r"\bincome \(?loss\)? from continuing operations attributable\b",
         ),
@@ -1057,7 +1076,7 @@ def _expand_source_backed_candidates(
         raw_kpi = raw_candidate.get("kpi")
         source_page_text = page_text_by_number.get(source.get("page"), "")
         if (
-            raw_kpi in {"sga_expense", "rd_expense"}
+            raw_kpi in {"sga_expense", "rd_expense", "net_income"}
             and _structural_evidence_error(
                 raw_kpi, str(source.get("row_label", "")), source_page_text
             )
@@ -1069,8 +1088,31 @@ def _expand_source_backed_candidates(
                     or alternative.get("source_id") == source.get("source_id")
                     or alternative.get("fiscal_year") != source.get("fiscal_year")
                     or alternative.get("status") != source.get("status")
-                    or _normalized_source_text(str(alternative.get("row_label", "")))
-                    != _normalized_source_text(str(source.get("row_label", "")))
+                    or (
+                        raw_kpi != "net_income"
+                        and _normalized_source_text(str(alternative.get("row_label", "")))
+                        != _normalized_source_text(str(source.get("row_label", "")))
+                    )
+                    or (
+                        raw_kpi == "net_income"
+                        and (
+                            "attributable to parent"
+                            not in _normalized_source_text(
+                                str(alternative.get("row_label", ""))
+                            )
+                            or "per share"
+                            in _normalized_source_text(
+                                str(alternative.get("row_label", ""))
+                            )
+                        )
+                    )
+                    or _semantic_row_error(
+                        raw_kpi,
+                        str(alternative.get("row_label", "")),
+                        str(alternative.get("status", "")),
+                        None,
+                    )
+                    is not None
                     or _structural_evidence_error(
                         raw_kpi,
                         str(alternative.get("row_label", "")),
