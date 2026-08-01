@@ -140,6 +140,20 @@ Later discussion of PQ Corporation.
     assert _registrant_name(text) == "Stepan"
 
 
+def test_report_identity_prefers_exact_registrant_over_glossy_all_caps_heading() -> None:
+    text = """\
+## STRONG FINANCIAL RESULTS
+
+Net Sales $3.3B
+
+Central Garden & Pet Company
+
+(Exact name of registrant as specified in its charter)
+"""
+
+    assert _registrant_name(text) == "Central Garden & Pet Company"
+
+
 def test_report_identity_combines_multiline_company_name_before_ticker() -> None:
     text = """\
 # ANNUAL

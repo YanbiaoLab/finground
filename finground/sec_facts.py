@@ -296,6 +296,13 @@ def _registrant_name(text: str) -> str | None:
         candidate = titled_company.group(1).strip(" #:-")
         if candidate.casefold() not in {"annual", "fiscal", "financial"}:
             return candidate
+    exact_name = re.search(
+        r"(?im)^(?:#+\s*)?([A-Z][A-Z0-9&'.,()/ -]{3,100})\s*$"
+        r"(?:(?:\r?\n){1,3})(?:\(?Exact name of (?:the )?[Rr]egistrant)",
+        cover,
+    )
+    if exact_name:
+        return exact_name.group(1).strip(" #")
     for match in re.finditer(r"(?im)^#{1,3}\s+(.{2,100}?)\s*$", cover[:2_000]):
         candidate = re.sub(
             r"\s+\d{4}\s+(?:achievements|annual report)\s*$",
@@ -332,13 +339,6 @@ def _registrant_name(text: str) -> str | None:
         )
         if 1 <= len(words) <= 8 and looks_like_company:
             return candidate
-    exact_name = re.search(
-        r"(?im)^(?:#+\s*)?([A-Z][A-Z0-9&'.,()/ -]{3,100})\s*$"
-        r"(?:(?:\r?\n){1,3})(?:\(?Exact name of (?:the )?[Rr]egistrant)",
-        cover,
-    )
-    if exact_name:
-        return exact_name.group(1).strip(" #")
     heading_name = re.search(
         r"(?im)^#{1,3}\s+([A-Z][A-Z0-9&'., /-]{2,100}"
         r"(?:INC\.?|CORP\.?|CORPORATION|INCORPORATED|LIMITED|LTD\.?|N\.V\.))\s*$",
