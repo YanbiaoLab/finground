@@ -36,7 +36,7 @@ from finground.tools import (
 )
 
 MULTI_KPI_APP_NAME = "finground_multi_kpi"
-MULTI_KPI_PROMPT_VERSION = "independent-kpi-agents-v21"
+MULTI_KPI_PROMPT_VERSION = "independent-kpi-agents-v22"
 MULTI_KPI_LLM_CALL_LIMIT = 200
 MULTI_KPI_SEARCH_LIMIT = KPI_SPECIALIST_SEARCH_LIMIT
 MULTI_KPI_PROGRESS_REMINDER_CALL = math.ceil(MULTI_KPI_LLM_CALL_LIMIT * 0.60)

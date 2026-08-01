@@ -1398,6 +1398,86 @@ def test_record_multi_kpi_progress_normalizes_interest_expense_as_positive_cost(
     assert recorded["normalization"]["sign_rule"] == "positive_magnitude"
 
 
+@pytest.mark.parametrize("kpi,line_label", [("capex", "Purchase of equipment"), ("dividends_paid", "Dividends paid")])
+def test_record_multi_kpi_progress_preserves_lse_outflow_sign(
+    kpi: str,
+    line_label: str,
+) -> None:
+    report = Report(
+        "LSE_ACME.L_2023",
+        "LSE",
+        "ACME.L",
+        2023,
+        f"""\
+## Consolidated cash flow statement
+£'000
+<table><tr><td></td><td>2023</td></tr>
+<tr><td>{line_label}</td><td>(113)</td></tr></table>
+""",
+    )
+    context = SimpleNamespace(
+        state={"report": build_report_state(report)},
+        actions=SimpleNamespace(skip_summarization=None),
+    )
+    evidence = {
+        "kpi": kpi,
+        "fiscal_year": 2023,
+        "status": "found",
+        "value_verbatim": "(113)",
+        "unit_scale": "thousands",
+        "unit_text": "£'000",
+        "unit_page": 1,
+        "page": 1,
+        "line_label": line_label,
+        "year_label": "2023",
+    }
+
+    result = record_multi_kpi_progress("GBP", None, [evidence], [], context)
+
+    assert result["status"] == "success"
+    recorded = context.state[MULTI_KPI_WORK_RECORD_STATE_KEY]["kpis"][0]
+    assert recorded["value"] == -113_000.0
+    assert recorded["normalization"]["sign_rule"] == "as_reported"
+
+
+def test_record_multi_kpi_progress_accepts_number_in_prose_on_page_with_tables() -> None:
+    report = Report(
+        "LSE_ACME.L_2023",
+        "LSE",
+        "ACME.L",
+        2023,
+        """\
+## Share capital
+For the year ended 31 August 2023
+The allotted, called up and fully paid share capital is made up of 22,626,466 ordinary shares.
+<table><tr><td>Share capital</td><td>226</td></tr></table>
+""",
+    )
+    context = SimpleNamespace(
+        state={"report": build_report_state(report)},
+        actions=SimpleNamespace(skip_summarization=None),
+    )
+    evidence = {
+        "kpi": "shares_outstanding",
+        "fiscal_year": 2023,
+        "status": "found",
+        "value_verbatim": "22,626,466",
+        "unit_scale": "units",
+        "page": 1,
+        "line_label": (
+            "The allotted, called up and fully paid share capital is made up of "
+            "22,626,466 ordinary shares."
+        ),
+        "year_label": "31 August 2023",
+    }
+
+    result = record_multi_kpi_progress("GBP", None, [evidence], [], context)
+
+    assert result["status"] == "success"
+    recorded = context.state[MULTI_KPI_WORK_RECORD_STATE_KEY]["kpis"][0]
+    assert recorded["value"] == 22_626_466.0
+
+
 def test_record_multi_kpi_progress_requires_printed_number_sign() -> None:
     context = _context()
     context.state["report"]["pages"][2]["text"] += "\n| Interest expense | (113) | (101) |"

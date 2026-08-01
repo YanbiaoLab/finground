@@ -362,7 +362,8 @@ def _detected_unit_scale(kpi: str, unit_text: str | None) -> UnitScale:
 
 def _source_rows(page_text: str) -> list[str]:
     html_rows = re.findall(r"<tr\b[^>]*>.*?</tr>", page_text, flags=re.IGNORECASE | re.DOTALL)
-    return html_rows or page_text.splitlines() or [page_text]
+    prose_lines = [line for line in page_text.splitlines() if line.strip()]
+    return [*html_rows, *prose_lines] or [page_text]
 
 
 def _line_contains_number(page_text: str, line_label: str, value_verbatim: str) -> bool:
@@ -554,6 +555,7 @@ def _normalize_multi_kpi_candidates(
     pages: list[Any],
     report_year: int,
     *,
+    ledger_exchange: str | None = None,
     source_backed_indexes: set[int] | None = None,
 ) -> tuple[list[MultiKpiEvidence], list[dict[str, str]], list[dict[str, Any]]]:
     source_backed_indexes = source_backed_indexes or set()
@@ -792,7 +794,14 @@ def _normalize_multi_kpi_candidates(
                     }
                 )
                 continue
-            if candidate.kpi in POSITIVE_MAGNITUDE_KPIS:
+            preserve_ledger_outflow_sign = (
+                candidate.kpi in POSITIVE_OUTFLOW_KPIS
+                and (ledger_exchange or "").upper() == "LSE"
+            )
+            if preserve_ledger_outflow_sign:
+                value = parsed_number * SCALE_MULTIPLIERS[scale]
+                sign_rule = "as_reported"
+            elif candidate.kpi in POSITIVE_MAGNITUDE_KPIS:
                 value = abs(value)
                 sign_rule = (
                     "positive_outflow"
@@ -1122,6 +1131,7 @@ def record_multi_kpi_progress(
         expanded_kpis,
         pages,
         int(report.get("year", 0)),
+        ledger_exchange=str(report.get("exchange", "")),
         source_backed_indexes=source_backed_indexes,
     )
     evidence_errors = [*source_errors, *evidence_errors]
@@ -1348,6 +1358,7 @@ def submit_multi_kpi_extraction(
         kpis,
         pages,
         int(report.get("year", 0)),
+        ledger_exchange=str(report.get("exchange", "")),
     )
     errors = _multi_kpi_submission_errors(metadata, report)
     errors.extend(evidence_errors)
