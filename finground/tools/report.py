@@ -489,7 +489,7 @@ def prepare_multi_kpi_report(tool_context: ToolContext) -> dict:
         ):
             all_source_cells[cell["source_id"]] = cell
     tool_context.state[MULTI_KPI_SOURCE_CELLS_STATE_KEY] = all_source_cells
-    report_text = "\n".join(str(page.get("text", "")) for page in report_pages)[:40_000]
+    report_text = "\n".join(str(page.get("text", "")) for page in report_pages)
     sec_facts = (
         resolve_sec_kpis(
             str(result.get("ticker", "")),

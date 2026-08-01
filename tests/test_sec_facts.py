@@ -73,6 +73,51 @@ def test_sec_flow_prefers_fact_from_target_year_filing_over_later_comparative() 
     assert extract_sec_kpis(facts, 2017)["operating_cash_flow"]["value"] == 50_153_000
 
 
+def test_sec_revenue_waterfall_skips_newer_tag_value_absent_from_report() -> None:
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                    "units": {
+                        "USD": [
+                            {
+                                **_fact(647_819_000, start="2017-01-01"),
+                                "fy": 2018,
+                                "filed": "2019-02-11",
+                            }
+                        ]
+                    }
+                },
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                **_fact(0, start="2017-01-01"),
+                                "fy": 2017,
+                            }
+                        ]
+                    }
+                },
+                "SalesRevenueNet": {
+                    "units": {
+                        "USD": [
+                            {
+                                **_fact(659_809_000, start="2017-01-01"),
+                                "fy": 2017,
+                            }
+                        ]
+                    }
+                },
+            }
+        }
+    }
+
+    assert extract_sec_kpis(facts, 2017, "Total Revenue $659,809")["revenue"] == {
+        "value": 659_809_000.0,
+        "concept": "SalesRevenueNet",
+    }
+
+
 def test_sec_waterfall_does_not_use_noncanonical_concept_fallbacks() -> None:
     facts = {
         "facts": {

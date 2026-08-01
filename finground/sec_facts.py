@@ -498,7 +498,11 @@ def _fiscal_year(entry: dict[str, Any]) -> int | None:
     return end.year - 1 if end.month == 1 else end.year
 
 
-def _pick(entries: list[dict[str, Any]], year: int, kind: str) -> dict[str, Any] | None:
+def _pick(
+    entries: list[dict[str, Any]],
+    year: int,
+    kind: str,
+) -> dict[str, Any] | None:
     candidates = []
     for entry in entries:
         if entry.get("fp") != "FY" or not str(entry.get("form", "")).startswith(("10-K", "20-F")):
@@ -532,7 +536,13 @@ def _pick(entries: list[dict[str, Any]], year: int, kind: str) -> dict[str, Any]
     return max(candidates, key=key)
 
 
-def _tag_value(facts: dict[str, Any], tag: str, unit: str, year: int, kind: str) -> float | None:
+def _tag_value(
+    facts: dict[str, Any],
+    tag: str,
+    unit: str,
+    year: int,
+    kind: str,
+) -> float | None:
     entries = facts.get("facts", {}).get("us-gaap", {}).get(tag, {}).get("units", {}).get(unit, [])
     hit = _pick(entries, year, kind)
     return float(hit["val"]) if hit is not None else None
@@ -572,15 +582,49 @@ def _ifrs_tag_value(facts: dict[str, Any], tag: str, year: int, kind: str) -> fl
     return float(hit["val"])
 
 
-def extract_sec_kpis(facts: dict[str, Any], year: int) -> dict[str, dict[str, Any]]:
+def _printed_value_visible(value: float, report_text: str) -> bool:
+    absolute = abs(value)
+    for divisor in (1.0, 1_000.0, 1_000_000.0, 1_000_000_000.0):
+        scaled = absolute / divisor
+        tokens = (
+            (f"{scaled:,.0f}", f"{scaled:.0f}")
+            if scaled.is_integer()
+            else (f"{scaled:,.3f}".rstrip("0").rstrip("."), f"{scaled:g}")
+        )
+        if any(
+            len(token) >= 2
+            and re.search(rf"(?<![\d.]){re.escape(token)}(?![\d.])", report_text)
+            for token in tokens
+        ):
+            return True
+    return False
+
+
+def extract_sec_kpis(
+    facts: dict[str, Any], year: int, report_text: str = ""
+) -> dict[str, dict[str, Any]]:
     """Apply the LEDGER-aligned tag waterfall to one Company Facts payload."""
     values: dict[str, dict[str, Any]] = {}
     for kpi, (kind, unit, tags, fallbacks) in _DEFS.items():
+        tag_hits: list[tuple[str, float]] = []
         for tag in tags:
             value = _tag_value(facts, tag, unit, year, kind)
-            if value is not None:
-                values[kpi] = {"value": value, "concept": tag}
-                break
+            if value is not None and (
+                kpi != "revenue"
+                or not report_text
+                or _printed_value_visible(value, report_text)
+            ):
+                tag_hits.append((tag, value))
+        if tag_hits:
+            tag, value = (
+                next(
+                    ((tag, value) for tag, value in tag_hits if value != 0),
+                    tag_hits[0],
+                )
+                if kpi == "revenue"
+                else tag_hits[0]
+            )
+            values[kpi] = {"value": value, "concept": tag}
         if kpi in values:
             continue
         for components in fallbacks:
@@ -646,7 +690,7 @@ def resolve_sec_kpis(ticker: str, year: int, report_text: str = "") -> dict[str,
                 )
             except (HTTPError, URLError, IncompleteRead, OSError, ValueError):
                 continue
-            values = extract_sec_kpis(facts, year)
+            values = extract_sec_kpis(facts, year, report_text)
             score = _company_identity_score(
                 ticker=ticker,
                 report_entity=report_entity,
