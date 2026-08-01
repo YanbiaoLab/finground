@@ -173,6 +173,14 @@ class MultiKpiEvidenceCandidate(BaseModel):
         max_length=300,
         description="Consolidation and parent/NCI or other KPI-specific scope decision.",
     )
+    source_ids: list[str] = Field(
+        default_factory=list,
+        max_length=4,
+        description=(
+            "For capex only, two or more source cells whose printed cash-investment components "
+            "must be summed; otherwise leave empty and use one source_id."
+        ),
+    )
 
     @field_validator(
         "value_verbatim",
@@ -193,6 +201,8 @@ class MultiKpiEvidenceCandidate(BaseModel):
 
     @model_validator(mode="after")
     def validate_status_fields(self) -> MultiKpiEvidenceCandidate:
+        if self.source_ids and (self.kpi != "capex" or len(self.source_ids) < 2):
+            raise ValueError("source_ids requires at least two capex component cells")
         if self.status in {"found", "explicit_zero"}:
             required = {
                 "value_verbatim": self.value_verbatim,

@@ -90,6 +90,25 @@ def test_revenue_semantics_rejects_reit_components_and_bottom_line(label: str) -
     assert _semantic_row_error("revenue", label, "found") is not None
 
 
+def test_capex_semantics_accepts_property_additions_on_cash_flow_statement() -> None:
+    assert (
+        _semantic_row_error(
+            "capex",
+            "Additions to oil and gas properties",
+            "found",
+            "Consolidated Statements of Cash Flows",
+        )
+        is None
+    )
+
+
+def test_capex_semantics_rejects_property_additions_without_cash_flow_context() -> None:
+    assert (
+        _semantic_row_error("capex", "Additions to oil and gas properties", "found")
+        is not None
+    )
+
+
 def test_report_state_contains_document_pages() -> None:
     state = _context().state["report"]
 
@@ -1438,6 +1457,54 @@ def test_record_multi_kpi_progress_preserves_lse_outflow_sign(
     recorded = context.state[MULTI_KPI_WORK_RECORD_STATE_KEY]["kpis"][0]
     assert recorded["value"] == -113_000.0
     assert recorded["normalization"]["sign_rule"] == "as_reported"
+
+
+def test_record_multi_kpi_progress_sums_verified_capex_component_sources() -> None:
+    report = Report(
+        "LSE_ACME.L_2023",
+        "LSE",
+        "ACME.L",
+        2023,
+        """\
+## Consolidated cash flow statement
+£'000
+<table><tr><td></td><td>2023</td></tr>
+<tr><td>Purchase of property, plant and equipment</td><td>(2,098)</td></tr>
+<tr><td>Capitalised development costs and purchased software</td><td>(1,711)</td></tr>
+<tr><td>Acquisition of businesses</td><td>(5,114)</td></tr></table>
+""",
+    )
+    context = SimpleNamespace(
+        state={"report": build_report_state(report)},
+        actions=SimpleNamespace(skip_summarization=None),
+    )
+    page = read_report_pages(
+        [1],
+        ["Purchase of property", "Capitalised development"],
+        context,
+    )
+    cells = {
+        cell["row_label"]: cell["source_id"]
+        for cell in page["pages"][0]["source_cells"]
+    }
+    evidence = {
+        "kpi": "capex",
+        "fiscal_year": 2023,
+        "status": "found",
+        "statement": "Consolidated cash flow statement",
+        "source_ids": [
+            cells["Purchase of property, plant and equipment"],
+            cells["Capitalised development costs and purchased software"],
+        ],
+    }
+
+    result = record_multi_kpi_progress("GBP", None, [evidence], [], context)
+
+    assert result["status"] == "success"
+    recorded = context.state[MULTI_KPI_WORK_RECORD_STATE_KEY]["kpis"][0]
+    assert recorded["value"] == -3_809_000.0
+    assert recorded["source_ids"] == evidence["source_ids"]
+    assert "Acquisition of businesses" not in recorded["line_label"]
 
 
 def test_record_multi_kpi_progress_accepts_number_in_prose_on_page_with_tables() -> None:

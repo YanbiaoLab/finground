@@ -33,6 +33,7 @@ from finground.sec_facts import SEC_FACTS_STATE_KEY
 
 from .report import (
     MULTI_KPI_SOURCE_CELLS_STATE_KEY,
+    REPORT_STATE_KEY,
     report_from_state,
 )
 from .structured import JsonSchemaFunctionTool
@@ -131,7 +132,12 @@ def _normalized_source_text(text: str) -> str:
     return " ".join(visible_text.casefold().split())
 
 
-def _semantic_row_error(kpi: str, line_label: str, status: str) -> str | None:
+def _semantic_row_error(
+    kpi: str,
+    line_label: str,
+    status: str,
+    statement: str | None = None,
+) -> str | None:
     """Reject only row labels that cannot represent the requested canonical KPI."""
     label = _normalized_source_text(line_label)
 
@@ -249,7 +255,11 @@ def _semantic_row_error(kpi: str, line_label: str, status: str) -> str | None:
         return "interest_expense excludes interest income and interest rates"
     if kpi == "income_tax_expense" and "income taxes paid" in label:
         return "income_tax_expense is accrual tax expense/benefit, not cash taxes paid"
-    if kpi == "capex" and re.search(r"\badditions?\b", label):
+    if (
+        kpi == "capex"
+        and re.search(r"\badditions?\b", label)
+        and "cash flow" not in _normalized_source_text(statement or "")
+    ):
         return (
             "capex requires a cash purchase/payment row; PP&E or property additions "
             "are accrual asset-note movements"
@@ -608,7 +618,12 @@ def _normalize_multi_kpi_candidates(
         assert candidate.page is not None
         assert candidate.line_label is not None
         assert candidate.value_verbatim is not None
-        semantic_error = _semantic_row_error(candidate.kpi, candidate.line_label, candidate.status)
+        semantic_error = _semantic_row_error(
+            candidate.kpi,
+            candidate.line_label,
+            candidate.status,
+            candidate.statement,
+        )
         if semantic_error is not None:
             errors.append(
                 {
@@ -840,10 +855,131 @@ def _expand_source_backed_candidates(
     source_cells = tool_context.state.get(MULTI_KPI_SOURCE_CELLS_STATE_KEY, {})
     if not isinstance(source_cells, dict):
         source_cells = {}
+    report = tool_context.state.get(REPORT_STATE_KEY, {})
+    report_pages = report.get("pages", []) if isinstance(report, dict) else []
+    page_text_by_number = {
+        page.get("display_number"): str(page.get("text", ""))
+        for page in report_pages
+        if isinstance(page, dict)
+    }
+
+    def source_statement(raw_statement: object, page_numbers: list[object]) -> str | None:
+        if isinstance(raw_statement, str) and raw_statement.strip():
+            return raw_statement
+        if all(
+            "cash flow" in _normalized_source_text(page_text_by_number.get(page, "")[:1_500])
+            for page in page_numbers
+        ):
+            return "Audited cash flow statement"
+        return None
+
     expanded: list[object] = []
     errors: list[dict[str, str]] = []
     source_backed_indexes: set[int] = set()
     for index, raw_candidate in enumerate(raw_candidates):
+        if isinstance(raw_candidate, dict) and raw_candidate.get("source_ids"):
+            source_ids = raw_candidate.get("source_ids")
+            if raw_candidate.get("kpi") != "capex" or not isinstance(source_ids, list):
+                errors.append(
+                    {
+                        "field": f"kpis.{index}.source_ids",
+                        "message": "multiple source cells are supported only for capex",
+                    }
+                )
+                expanded.append(_INVALID_SOURCE_CANDIDATE)
+                continue
+            sources = [source_cells.get(source_id) for source_id in source_ids]
+            if len(source_ids) < 2 or any(not isinstance(source, dict) for source in sources):
+                errors.append(
+                    {
+                        "field": f"kpis.{index}.source_ids",
+                        "message": "every capex component source_id must be available",
+                    }
+                )
+                expanded.append(_INVALID_SOURCE_CANDIDATE)
+                continue
+            typed_sources = [source for source in sources if isinstance(source, dict)]
+            labels = [str(source.get("row_label", "")) for source in typed_sources]
+            normalized_labels = [_normalized_source_text(label) for label in labels]
+            has_property_component = any(
+                re.search(r"\b(?:property|properties|plant|equipment|fixed assets)\b", label)
+                for label in normalized_labels
+            )
+            allowed_component = all(
+                re.search(
+                    r"\b(?:purchase|purchases|additions|capitalised|capitalized)\b",
+                    label,
+                )
+                and re.search(
+                    r"\b(?:property|properties|plant|equipment|software|development|intangible)\b",
+                    label,
+                )
+                for label in normalized_labels
+            )
+            years = {source.get("fiscal_year") for source in typed_sources}
+            units = {source.get("unit_text") for source in typed_sources}
+            statuses = {source.get("status") for source in typed_sources}
+            if (
+                not has_property_component
+                or not allowed_component
+                or len(years) != 1
+                or len(units) != 1
+                or statuses != {"found"}
+            ):
+                errors.append(
+                    {
+                        "field": f"kpis.{index}.source_ids",
+                        "message": (
+                            "capex components must be same-year, same-unit printed cash-investment "
+                            "rows and include a property/plant/equipment component"
+                        ),
+                    }
+                )
+                expanded.append(_INVALID_SOURCE_CANDIDATE)
+                continue
+            try:
+                component_values = [
+                    parse_financial_number(str(source["value_verbatim"]))
+                    for source in typed_sources
+                ]
+            except (KeyError, ValueError):
+                errors.append(
+                    {
+                        "field": f"kpis.{index}.source_ids",
+                        "message": "capex component cells must contain financial numbers",
+                    }
+                )
+                expanded.append(_INVALID_SOURCE_CANDIDATE)
+                continue
+            total = sum(component_values)
+            total_token = f"({abs(total):g})" if total < 0 else f"{total:g}"
+            unit_text = next(iter(units))
+            unit_scale = _detected_unit_scale("capex", unit_text)
+            if unit_scale == "unknown":
+                unit_scale = "units"
+            first = typed_sources[0]
+            source_backed_indexes.add(index)
+            expanded.append(
+                {
+                    "kpi": "capex",
+                    "fiscal_year": next(iter(years)),
+                    "status": "found",
+                    "value_verbatim": total_token,
+                    "unit_scale": unit_scale,
+                    "unit_text": unit_text,
+                    "unit_page": first.get("unit_page", first["page"]),
+                    "page": first["page"],
+                    "statement": source_statement(
+                        raw_candidate.get("statement"),
+                        [source.get("page") for source in typed_sources],
+                    ),
+                    "line_label": " + ".join(labels),
+                    "year_label": first["year_label"],
+                    "scope": "sum of printed capex cash-investment components",
+                    "source_ids": source_ids,
+                }
+            )
+            continue
         if not isinstance(raw_candidate, dict) or "source_id" not in raw_candidate:
             expanded.append(raw_candidate)
             continue
@@ -921,6 +1057,10 @@ def _expand_source_backed_candidates(
                 if unit_text is not None
                 else None,
                 "page": source["page"],
+                "statement": source_statement(
+                    raw_candidate.get("statement"),
+                    [source.get("page")],
+                ),
                 "line_label": line_label,
                 "year_label": source["year_label"],
                 "scope": (
