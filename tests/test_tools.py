@@ -94,6 +94,16 @@ def test_revenue_semantics_rejects_reit_components_and_bottom_line(label: str) -
     assert _semantic_row_error("revenue", label, "found") is not None
 
 
+def test_interest_expense_semantics_accepts_printed_net_expense_subtotal() -> None:
+    assert (
+        _semantic_row_error(
+            "interest_expense", "Interest expense, net of interest income", "found"
+        )
+        is None
+    )
+    assert _semantic_row_error("interest_expense", "Net interest income", "found") is not None
+
+
 def test_number_evidence_accepts_markdown_heading_and_adjacent_sentence() -> None:
     assert _line_contains_number(
         "## Debt maturities\n\nOur long-term debt matures as follows: $440 million in 2018.",

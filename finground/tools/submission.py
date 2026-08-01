@@ -283,7 +283,10 @@ def _semantic_row_error(
         return "revenue requires the operating top line, not proceeds, gains, costs, or deferred revenue"
     if kpi == "gross_profit" and re.search(r"(?:%|percent|percentage)", label):
         return "gross_profit requires a monetary amount, not a margin percentage"
-    if kpi == "interest_expense" and ("interest income" in label or "interest rate" in label):
+    if kpi == "interest_expense" and (
+        "interest rate" in label
+        or ("interest income" in label and "interest expense" not in label)
+    ):
         return "interest_expense excludes interest income and interest rates"
     if kpi == "income_tax_expense" and "income taxes paid" in label:
         return "income_tax_expense is accrual tax expense/benefit, not cash taxes paid"
