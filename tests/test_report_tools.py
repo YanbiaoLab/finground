@@ -9,6 +9,7 @@ from finground.report_tools import (
     MAX_READ_CALLS,
     MAX_SEARCH_RESULTS,
     MAX_SNIPPET_CHARS,
+    prepare_report_question,
     read_report_chunks,
     search_report,
 )
@@ -56,6 +57,45 @@ def test_search_requires_knowledge_and_scans_evidence_at_report_end() -> None:
     assert result["items"][0]["chunk_id"] == "ACME_2025:p2000:c0"
     assert len(result["items"]) <= MAX_SEARCH_RESULTS
     assert len(result["items"][0]["snippet"]) <= MAX_SNIPPET_CHARS
+
+
+def test_general_question_requires_preparation_before_report_access() -> None:
+    context = _context([_chunk(10, "The company depends on a limited number of suppliers.")])
+    context.agent_name = "report_qa_worker"
+
+    blocked = asyncio.run(search_report("ACME_2025", "suppliers", "", 8, context))
+    prepared = prepare_report_question(
+        "ACME_2025",
+        "  What supplier risks does the company disclose?  ",
+        context,
+    )
+    result = asyncio.run(search_report("ACME_2025", "suppliers", "", 8, context))
+
+    assert blocked["status"] == "error"
+    assert "PrepareReportQuestion" in blocked["error"]
+    assert prepared["question"] == "What supplier risks does the company disclose?"
+    assert result["status"] == "success"
+    assert result["items"][0]["chunk_id"] == "ACME_2025:p10:c0"
+
+
+def test_kpi_knowledge_does_not_replace_general_question_preparation() -> None:
+    context = _context([_chunk(10, "The company depends on a limited number of suppliers.")])
+    context.agent_name = "report_qa_worker"
+    get_kpi_knowledge("revenue", context)
+
+    result = asyncio.run(search_report("ACME_2025", "suppliers", "", 8, context))
+
+    assert result["status"] == "error"
+    assert "PrepareReportQuestion" in result["error"]
+
+
+def test_general_question_preparation_rejects_another_report() -> None:
+    context = _context([_chunk(1, "ordinary disclosure")])
+
+    result = prepare_report_question("OTHER_2025", "What are the risks?", context)
+
+    assert result["status"] == "error"
+    assert "report_ref" in result["error"]
 
 
 def test_cursor_is_opaque_and_chunks_must_be_authorized() -> None:

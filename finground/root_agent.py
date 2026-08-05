@@ -7,12 +7,20 @@ from google.adk.agents import Agent
 from finground.config import create_agent_model
 from finground.kpi_dispatcher import DISPATCHER_NAME, create_kpi_dispatcher
 from finground.kpi_worker import WORKER_NAME, create_tool_call_retry_config
+from finground.report_qa_dispatcher import (
+    REPORT_QA_DISPATCHER_NAME,
+    create_report_qa_dispatcher,
+)
+from finground.report_qa_worker import REPORT_QA_WORKER_NAME
 from finground.task_plugin import ROOT_AGENT_NAME
 from finground.task_store import task_create, task_get, task_list, task_update
 
-ROOT_INSTRUCTION = f"""You coordinate multi-step work and delegate specialized execution. For KPI
-extraction, you never read annual-report text, choose evidence, calculate values, or alter a worker
-result.
+ROOT_INSTRUCTION = f"""You coordinate multi-step work and delegate specialized execution. You may
+answer ordinary conversational questions yourself, but you never read annual-report text, choose
+report evidence, calculate KPI values, or alter a worker result.
+
+Whenever you call a tool, call exactly one tool and supply one complete, valid JSON object for its
+arguments. Never emit empty, whitespace-only, partial, or prose-form tool arguments.
 
 When an upload placeholder supplies a report_ref, copy it exactly into every related task and worker
 input. Never invent, rewrite, or guess a report_ref.
@@ -34,10 +42,28 @@ For each requested canonical KPI:
    error so each remains visible and retryable.
 6. Inspect the task list before answering. Do not claim completion while any task is pending or
    in_progress; report incomplete work honestly.
+
+For a question about the uploaded annual report that is not a canonical KPI extraction:
+1. Create one task with metadata.task_input containing report_ref and the user's exact question.
+2. Add the returned task ID to metadata.task_input, then set the task to in_progress with owner
+   {REPORT_QA_WORKER_NAME}. Keep task-management calls sequential.
+3. Call {REPORT_QA_DISPATCHER_NAME} once with that exact task input and not alongside another tool.
+4. On success, preserve outcome.result exactly in metadata.result, clear any stale error, and
+   complete the task. On failure, return the task to pending and record outcome.error.
+5. Inspect the task list before answering and cite the worker evidence in a readable response.
+
+Route canonical KPI extraction through {DISPATCHER_NAME}, never through
+{REPORT_QA_DISPATCHER_NAME}. If one user request mixes KPI extraction with other report questions,
+create all necessary tasks and run the appropriate dispatcher for each task type. Questions that do
+not require the uploaded report do not need a task or worker.
 """
 
 
-def create_root_agent(*, worker: Agent | None = None) -> Agent:
+def create_root_agent(
+    *,
+    worker: Agent | None = None,
+    report_qa_worker: Agent | None = None,
+) -> Agent:
     return Agent(
         name=ROOT_AGENT_NAME,
         model=create_agent_model(),
@@ -50,5 +76,6 @@ def create_root_agent(*, worker: Agent | None = None) -> Agent:
             task_get,
             task_update,
             create_kpi_dispatcher(worker),
+            create_report_qa_dispatcher(report_qa_worker),
         ],
     )

@@ -53,7 +53,7 @@
               <div class="agent-avatar hero-avatar" aria-hidden="true"><span></span></div>
               <span class="eyebrow">FINANCIAL RESEARCH, GROUNDED</span>
               <h1>今天想研究什么？</h1>
-              <p>我可以拆解复杂任务、读取年报并提取带证据的财务指标。直接描述目标，也可以附上 PDF 或 Markdown 文件。</p>
+              <p>我可以拆解复杂任务、读取年报、提取财务指标，也可以回答年报中的业务与风险问题。所有结论都附带原文证据。</p>
               <section class="sample-reports hidden" id="sampleReports" aria-labelledby="sampleReportsTitle">
                 <div class="sample-reports-heading">
                   <div><span class="eyebrow">SAMPLE FILES</span><h2 id="sampleReportsTitle">选择示例文件</h2></div>
@@ -72,6 +72,11 @@
                   <button type="button" data-prompt="这份年报 FY2022 的 operating_cash_flow 是多少？请给出单位、页码和原文证据。">
                     <span class="suggestion-icon amber"><svg viewBox="0 0 22 22"><path d="M6 5h10M6 11h10M6 17h7M3 5h.1M3 11h.1M3 17h.1" /></svg></span>
                     <span><strong>核对单个 KPI</strong><small>经营现金流、单位与证据定位</small></span>
+                    <svg class="arrow" viewBox="0 0 20 20"><path d="M5 10h10m-4-4 4 4-4 4" /></svg>
+                  </button>
+                  <button type="button" data-prompt="请总结这份年报披露的主要业务风险，并为每项结论给出页码和原文证据。">
+                    <span class="suggestion-icon green"><svg viewBox="0 0 22 22"><path d="M11 3 3.5 6v5c0 4.5 3.2 7.2 7.5 8 4.3-.8 7.5-3.5 7.5-8V6L11 3Zm0 5v4m0 3h.1" /></svg></span>
+                    <span><strong>研究年报信息</strong><small>业务风险、治理与战略等非 KPI 问题</small></span>
                     <svg class="arrow" viewBox="0 0 20 20"><path d="M5 10h10m-4-4 4 4-4 4" /></svg>
                   </button>
                 </div>

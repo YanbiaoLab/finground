@@ -16,6 +16,7 @@ REPORT_STATE_KEY = "report"
 REPORT_BUDGET_STATE_KEY = "temp:report_budget"
 SEARCH_RESULTS_STATE_KEY = "temp:report_search_results"
 CURSORS_STATE_KEY = "temp:report_cursors"
+REPORT_QUESTION_STATE_KEY = "temp:report_question"
 
 MAX_CHUNK_CHARS = 6_000
 MAX_SEARCH_CALLS = 60
@@ -73,6 +74,47 @@ def _manifest(
     if not isinstance(manifest.get("artifact_name"), str):
         return None, _error("report manifest has no artifact_name")
     return manifest, None
+
+
+def prepare_report_question(
+    report_ref: str,
+    question: str,
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Authorize bounded report access for one non-KPI annual-report question."""
+    _, error = _manifest(report_ref, tool_context)
+    if error is not None:
+        return error
+    normalized_question = " ".join(question.split())
+    if not normalized_question:
+        return _error("question must not be empty")
+    tool_context.state[REPORT_QUESTION_STATE_KEY] = {
+        "report_ref": report_ref,
+        "question": normalized_question,
+    }
+    tool_context.state[REPORT_BUDGET_STATE_KEY] = {}
+    tool_context.state[SEARCH_RESULTS_STATE_KEY] = []
+    tool_context.state[CURSORS_STATE_KEY] = {}
+    return {
+        "status": "success",
+        "report_ref": report_ref,
+        "question": normalized_question,
+        "guidance": "Search using exact report terms, then read only the strongest evidence chunks.",
+    }
+
+
+def _has_report_access(report_ref: str, tool_context: ToolContext) -> bool:
+    question_context = tool_context.state.get(REPORT_QUESTION_STATE_KEY)
+    has_question_context = (
+        isinstance(question_context, dict) and question_context.get("report_ref") == report_ref
+    )
+    has_kpi_knowledge = tool_context.state.get(KNOWLEDGE_STATE_KEY) is not None
+    agent_name = getattr(tool_context, "agent_name", None)
+    if agent_name == "kpi_worker":
+        return has_kpi_knowledge
+    if agent_name == "report_qa_worker":
+        return has_question_context
+    return has_kpi_knowledge or has_question_context
 
 
 async def _load_chunks(
@@ -178,8 +220,10 @@ async def search_report(
     tool_context: ToolContext,
 ) -> dict[str, Any]:
     """Search every report chunk while returning only bounded candidate snippets."""
-    if tool_context.state.get(KNOWLEDGE_STATE_KEY) is None:
-        return _error("call GetKpiKnowledge before searching the report")
+    if not _has_report_access(report_ref, tool_context):
+        return _error(
+            "call GetKpiKnowledge or PrepareReportQuestion before searching the report"
+        )
     if not query.strip():
         return _error("query must not be empty")
     if isinstance(limit, bool) or not 1 <= limit <= MAX_SEARCH_RESULTS:
@@ -241,8 +285,10 @@ async def read_report_chunks(
     tool_context: ToolContext,
 ) -> dict[str, Any]:
     """Read at most three chunks previously returned by SearchReport."""
-    if tool_context.state.get(KNOWLEDGE_STATE_KEY) is None:
-        return _error("call GetKpiKnowledge before reading the report")
+    if not _has_report_access(report_ref, tool_context):
+        return _error(
+            "call GetKpiKnowledge or PrepareReportQuestion before reading the report"
+        )
     if not chunk_ids or len(chunk_ids) > MAX_READ_CHUNKS or len(set(chunk_ids)) != len(chunk_ids):
         return _error(f"chunk_ids must contain 1 to {MAX_READ_CHUNKS} unique ids")
     authorized = set(tool_context.state.get(SEARCH_RESULTS_STATE_KEY, []))
@@ -270,3 +316,7 @@ async def read_report_chunks(
 
 search_report_tool = NamedFunctionTool(search_report, name="SearchReport")
 read_report_chunks_tool = NamedFunctionTool(read_report_chunks, name="ReadReportChunks")
+prepare_report_question_tool = NamedFunctionTool(
+    prepare_report_question,
+    name="PrepareReportQuestion",
+)

@@ -1,5 +1,7 @@
+import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -9,10 +11,15 @@ from finground.kpi_dispatcher import (
     DISPATCH_ITEM_NAME,
     DISPATCHER_NAME,
     MAX_PARALLEL_WORKERS,
-    KpiDispatchOutcome,
     create_kpi_dispatcher,
 )
 from finground.kpi_worker import TOOL_CALL_MAX_ATTEMPTS, WORKER_NAME, create_kpi_worker
+from finground.report_qa_dispatcher import (
+    REPORT_QA_DISPATCHER_NAME,
+    REPORT_QA_NODE_NAME,
+    create_report_qa_dispatcher,
+)
+from finground.report_qa_worker import REPORT_QA_WORKER_NAME, create_report_qa_worker
 from finground.root_agent import create_root_agent
 from finground.task_store import TASK_TOOL_NAMES
 
@@ -21,7 +28,7 @@ def _tool_name(tool: object) -> str:
     return getattr(tool, "name", getattr(tool, "__name__", ""))
 
 
-def test_app_has_one_root_and_one_task_worker() -> None:
+def test_app_has_one_root_and_two_task_workers() -> None:
     assert app.root_agent is root_agent
     assert root_agent.sub_agents == []
     dispatcher = create_kpi_dispatcher()
@@ -30,7 +37,7 @@ def test_app_has_one_root_and_one_task_worker() -> None:
     assert len(parallel_workers) == 1
     assert DISPATCH_ITEM_NAME != WORKER_NAME
     assert parallel_workers[0].max_parallel_workers == MAX_PARALLEL_WORKERS
-    assert dispatcher.output_schema == list[KpiDispatchOutcome]
+    assert dispatcher.output_schema == list[dict[str, Any]]
     worker_retry = create_kpi_worker().retry_config
     root_retry = create_root_agent().retry_config
     assert worker_retry is not None
@@ -39,14 +46,51 @@ def test_app_has_one_root_and_one_task_worker() -> None:
     assert root_retry.max_attempts == TOOL_CALL_MAX_ATTEMPTS
     assert worker_retry.exceptions == ["JSONDecodeError"]
     assert root_retry.exceptions == ["JSONDecodeError"]
+    report_qa_dispatcher = create_report_qa_dispatcher()
+    assert [node.name for node in report_qa_dispatcher.graph.nodes] == [
+        "__START__",
+        REPORT_QA_NODE_NAME,
+    ]
+    assert report_qa_dispatcher.output_schema is not None
+    assert create_report_qa_worker().mode == "task"
+
+
+def test_root_workflow_tool_schemas_stay_shallow() -> None:
+    declarations = {
+        tool.name: tool._get_declaration().model_dump(mode="json", exclude_none=True)
+        for tool in root_agent.tools
+        if tool.name in {DISPATCHER_NAME, REPORT_QA_DISPATCHER_NAME}
+    }
+
+    assert declarations[DISPATCHER_NAME]["response_json_schema"] == {
+        "items": {"additionalProperties": True, "type": "object"},
+        "type": "array",
+    }
+    assert declarations[REPORT_QA_DISPATCHER_NAME]["response_json_schema"] == {
+        "additionalProperties": True,
+        "type": "object",
+    }
+    assert sum(len(json.dumps(value)) for value in declarations.values()) < 2_000
 
 
 def test_agents_expose_only_their_scoped_tools() -> None:
     worker = create_kpi_worker()
+    report_qa_worker = create_report_qa_worker()
 
-    assert [_tool_name(tool) for tool in root_agent.tools] == [*TASK_TOOL_NAMES, DISPATCHER_NAME]
+    assert [_tool_name(tool) for tool in root_agent.tools] == [
+        *TASK_TOOL_NAMES,
+        DISPATCHER_NAME,
+        REPORT_QA_DISPATCHER_NAME,
+    ]
     assert [_tool_name(tool) for tool in worker.tools] == [
         "GetKpiKnowledge",
+        "SearchReport",
+        "ReadReportChunks",
+        "finish_task",
+    ]
+    assert report_qa_worker.name == REPORT_QA_WORKER_NAME
+    assert [_tool_name(tool) for tool in report_qa_worker.tools] == [
+        "PrepareReportQuestion",
         "SearchReport",
         "ReadReportChunks",
         "finish_task",

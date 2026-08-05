@@ -15,6 +15,8 @@ from google.genai import types
 
 from finground.kpi_dispatcher import DISPATCHER_NAME
 from finground.kpi_worker import create_kpi_worker
+from finground.report_qa_dispatcher import REPORT_QA_DISPATCHER_NAME
+from finground.report_qa_worker import create_report_qa_worker
 from finground.root_agent import create_root_agent
 from finground.task_plugin import TaskProgressPlugin
 from finground.task_store import TASKS_STATE_KEY, task_create, task_list, task_update
@@ -459,6 +461,166 @@ def test_dispatcher_runs_kpi_workers_concurrently() -> None:
     asyncio.run(run())
 
     assert ConcurrentWorkerLlm.max_active_calls == 2
+
+
+def test_adk_task_mode_flow_answers_a_general_report_question() -> None:
+    async def run() -> tuple[dict, list]:
+        worker = create_report_qa_worker()
+        root = create_root_agent(report_qa_worker=worker)
+        question = "What supplier risk does the company disclose?"
+        result = {
+            "task_id": "1",
+            "report_ref": "ACME_2025",
+            "question": question,
+            "status": "answered",
+            "answer": "The company depends on a limited number of suppliers.",
+            "evidence": [
+                {
+                    "chunk_id": "ACME_2025:p31:c0",
+                    "page": 31,
+                    "heading": "Risk Factors",
+                    "text": "We depend on a limited number of suppliers.",
+                }
+            ],
+            "notes": [],
+        }
+        root.model = ScriptedLlm(
+            model="root-question-script",
+            responses=[
+                _tool_call(
+                    "TaskCreate",
+                    {
+                        "subject": "Answer supplier risk question",
+                        "description": "Answer a question from ACME_2025.",
+                        "activeForm": "Researching supplier risk",
+                        "metadata": {
+                            "task_input": {
+                                "report_ref": "ACME_2025",
+                                "question": question,
+                            }
+                        },
+                    },
+                ),
+                _tool_call(
+                    "TaskUpdate",
+                    {
+                        "taskId": "1",
+                        "status": "in_progress",
+                        "owner": "report_qa_worker",
+                        "metadata": {
+                            "task_input": {
+                                "task_id": "1",
+                                "report_ref": "ACME_2025",
+                                "question": question,
+                            }
+                        },
+                    },
+                ),
+                _tool_call(
+                    REPORT_QA_DISPATCHER_NAME,
+                    {
+                        "task_id": "1",
+                        "report_ref": "ACME_2025",
+                        "question": question,
+                    },
+                ),
+                _tool_call(
+                    "TaskUpdate",
+                    {
+                        "taskId": "1",
+                        "status": "completed",
+                        "metadata": {"result": result, "error": None},
+                    },
+                ),
+                _tool_call("TaskList", {}),
+                types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(text="The supplier risk is documented.")],
+                ),
+            ],
+        )
+        worker.model = ScriptedLlm(
+            model="report-question-worker-script",
+            responses=[
+                _tool_call(
+                    "PrepareReportQuestion",
+                    {"report_ref": "ACME_2025", "question": question},
+                ),
+                _tool_call(
+                    "SearchReport",
+                    {
+                        "report_ref": "ACME_2025",
+                        "query": "limited number suppliers",
+                        "cursor": "",
+                        "limit": 8,
+                    },
+                ),
+                _tool_call(
+                    "ReadReportChunks",
+                    {
+                        "report_ref": "ACME_2025",
+                        "chunk_ids": ["ACME_2025:p31:c0"],
+                    },
+                ),
+                _tool_call("finish_task", result),
+            ],
+        )
+        app = App(name="report_question_test", root_agent=root, plugins=[TaskProgressPlugin()])
+        sessions = InMemorySessionService()
+        artifacts = InMemoryArtifactService()
+        await sessions.create_session(
+            app_name=app.name,
+            user_id="user",
+            session_id="session",
+            state={
+                "report": {
+                    "report_ref": "ACME_2025",
+                    "artifact_name": "report.jsonl",
+                }
+            },
+        )
+        report = {
+            "chunk_id": "ACME_2025:p31:c0",
+            "page": 31,
+            "heading": "Risk Factors",
+            "text": "We depend on a limited number of suppliers.",
+        }
+        await artifacts.save_artifact(
+            app_name=app.name,
+            user_id="user",
+            session_id="session",
+            filename="report.jsonl",
+            artifact=types.Part.from_bytes(
+                data=json.dumps(report).encode(),
+                mime_type="application/x-ndjson",
+            ),
+        )
+        runner = Runner(app=app, session_service=sessions, artifact_service=artifacts)
+        events = [
+            event
+            async for event in runner.run_async(
+                user_id="user",
+                session_id="session",
+                new_message=types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=question)],
+                ),
+            )
+        ]
+        session = await sessions.get_session(
+            app_name=app.name,
+            user_id="user",
+            session_id="session",
+        )
+        return session.state[TASKS_STATE_KEY]["1"], events
+
+    task, events = asyncio.run(run())
+
+    assert task["status"] == "completed"
+    assert task["metadata"]["result"]["status"] == "answered"
+    assert task["metadata"]["result"]["evidence"][0]["page"] == 31
+    assert any(event.author == "report_qa_worker" for event in events)
+    assert events[-1].content.parts[0].text == "The supplier risk is documented."
 
 
 def test_dispatcher_retries_and_isolates_one_worker_failure() -> None:

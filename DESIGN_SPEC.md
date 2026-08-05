@@ -1,23 +1,26 @@
-# FinGround KPI Extraction Agent — Design Specification
+# FinGround Annual Report Agent — Design Specification
 
 ## 1. Overview
 
-FinGround 是一个基于 Google ADK 的多 Agent 年报 KPI 提取系统。用户提供一份年报引用、
-目标财年和一个或多个 KPI；系统为每个 KPI 建立独立任务，从年报中找到可审计证据，完成
-数值归一化，并返回结构化结果。
+FinGround 是一个基于 Google ADK 的多 Agent 年报研究系统。用户可以从年报提取一个或多个 KPI，
+也可以询问当前年报中的业务、风险、战略、治理或其他非 KPI 信息。系统为执行型请求建立独立任务，
+从年报中找到可审计证据并返回结构化结果。
 
 年报可能远大于模型上下文窗口。任何情况下都不得把年报全文放入 Root 或 Worker 的 prompt、
 对话历史或单次工具响应。年报由工具侧存储并分块检索；模型在每个 task 中只能看到有严格大小
 上限的候选摘要和证据片段。
 
-系统只包含两个 Agent 角色：
+系统只包含三个 Agent 角色：
 
 1. `root_agent`：负责理解请求、规划任务、委派任务、监督进度和汇总结果。它不能读取年报，
    也不能判断 KPI 数值。
-2. `kpi_worker`：唯一的执行型 Agent，使用 ADK `mode="task"`。Root 通过一个 ADK Workflow
+2. `kpi_worker`：KPI 执行 Agent，使用 ADK `mode="task"`。Root 通过一个 ADK Workflow
    dispatcher 提交一批单 KPI 输入；Workflow 使用 `parallel_worker` 在隔离分支中并发运行多个
    Worker 实例。每个实例仍只处理一个 KPI，必须先读取该 KPI 的知识条目，再读取年报并返回
    一个结构化结果。
+3. `report_qa_worker`：通用年报问答 Agent，使用 ADK `mode="task"`。它处理 KPI 目录之外、但可由
+   当前年报回答的单个问题；必须先登记问题访问上下文，再通过受限 report tools 查找和读取证据。
+   它不能执行规范化 KPI 提取，也不能访问网络或 Root 的任务工具。
 
 任务状态由 session 内的通用 Task Store 保存。它遵循 Claude Code 公开 SDK 中的任务协议，
 KPI 输入、Worker 结果和错误只作为任务 `metadata`，不进入任务工具的数据模型。一个 ADK Plugin
@@ -38,9 +41,11 @@ event id 替换，无法按 id 匹配时只替换最后一个同角色 partial e
 每个 event 到达后按 ADK Web 的方式浅合并当前 session state，并在 `tasks` 快照变化时立即更新每个
 任务的 pending、in_progress、completed 或等待重试状态。首次收到 task delta 时展示任务区；只在
 一次 `/run_sse` 结束后读取一次 session 校准最终状态。
-`kpi_worker` event 不显示其内部文本或原始 tool payload，但页面根据 event 的 `isolationScope` 将其
-关联到对应 task，并根据 `GetKpiKnowledge`、`SearchReport`、`ReadReportChunks`、`finish_task`
-function call/response 即时展示“读取 KPI 规则、搜索年报、核验证据、等待汇总”等单任务阶段。
+task-mode Worker event 不显示其内部文本或原始 tool payload，但页面根据 event 的
+`isolationScope` 将其关联到对应 task。KPI Worker 根据 `GetKpiKnowledge`、`SearchReport`、
+`ReadReportChunks`、`finish_task` 展示“读取 KPI 规则、搜索年报、核验证据、等待汇总”等阶段；
+通用问答 Worker 根据 `PrepareReportQuestion` 和相同的检索工具展示“理解问题、搜索年报、核验证据、
+等待汇总”等阶段。
 消息正文支持安全的 Markdown 标题、列表、代码块和 GFM 表格；KPI 结果表使用语义化状态徽标，
 证据列允许换行，窄屏或超宽内容通过表格容器横向滚动，不能把 Markdown 分隔符作为正文展示。
 `web/raw-pdf/` 中的 PDF 自动显示为欢迎页示例文件；用户选取后只作为普通附件加入输入框。示例问题
@@ -50,11 +55,12 @@ function call/response 即时展示“读取 KPI 规则、搜索年报、核验�
 
 ## 2. Goals
 
-- 使用 ADK 原生混合编排：一个自由规划的 Root、一个 Workflow dispatcher、一个 task-mode
-  Worker 定义。
+- 使用 ADK 原生混合编排：一个自由规划的 Root、两个 Workflow dispatcher、两个职责互斥的
+  task-mode Worker 定义。
 - Root 只规划和监督，不接触年报内容。
 - 一个任务只负责一个 KPI，任务边界清晰、可重试、可审计。
 - Worker 在执行前必须通过工具读取对应 KPI 的知识。
+- KPI 目录之外的年报问题由通用问答 Worker 基于原文证据回答。
 - 支持正文大小超过模型上下文窗口的单份年报，且资源消耗不随全文长度线性进入模型上下文。
 - 每个结果必须包含来源证据，不能只返回数值。
 - 任务进度可查询，Root 不能在仍有未完成任务时宣称全部完成。
@@ -73,6 +79,8 @@ function call/response 即时展示“读取 KPI 规则、搜索年报、核验�
   `parallel_worker`。
 - 不实现部署、鉴权、租户隔离或生产级持久化。
 - 不保留旧架构的兼容层。
+- 通用问答不访问互联网、不回答脱离当前年报的一般知识问题，也不绕过 KPI knowledge 生成
+  规范化 KPI 结果。
 
 ## 4. Input Contract
 
@@ -83,6 +91,15 @@ function call/response 即时展示“读取 KPI 规则、搜索年报、核验�
   "report_ref": "ACME_2025",
   "target_year": 2025,
   "kpis": ["revenue", "net_income"]
+}
+```
+
+非 KPI 年报问题使用以下任务输入：
+
+```json
+{
+  "report_ref": "ACME_2025",
+  "question": "公司认为供应链面临哪些主要风险？"
 }
 ```
 
@@ -164,6 +181,12 @@ root_agent
                      ├── SearchReport
                      ├── ReadReportChunks
                      └── finish_task  ← ADK built-in
+  └── answer_report_question  ← ADK Workflow tool
+         └── report_qa_worker  ← isolated ADK task-mode run
+               ├── PrepareReportQuestion
+               ├── SearchReport
+               ├── ReadReportChunks
+               └── finish_task  ← ADK built-in
 
 TaskProgressPlugin
   ├── observes root task-tool calls
@@ -197,6 +220,11 @@ Root 的唯一职责：
 6. 检查是否还有未完成任务。
 7. 汇总结果并回答用户。
 
+对于 KPI 目录之外的当前年报问题，Root 创建一个通用任务，把 `task_id`、`report_ref` 和原始
+`question` 放入 `metadata.task_input`，标记 owner 为 `report_qa_worker`，调用一次
+`answer_report_question`，并按照相同的成功完成、失败返回 pending 规则保存结果。若请求明显是
+规范化 KPI 提取，必须走 KPI 流程；通用问答 Worker 不能作为绕过 KPI knowledge 的替代路径。
+
 Root 不拥有以下能力：
 
 - 搜索或读取年报；
@@ -228,7 +256,28 @@ Root 不拥有以下能力：
 
 Worker 不得处理输入范围外的 KPI，也不得凭模型记忆替代 KPI 知识工具。
 
-### 5.3 KPI Dispatcher
+### 5.3 Report QA Worker
+
+`report_qa_worker` 配置：
+
+- ADK mode：`task`；
+- 每次输入：一个 `ReportQuestionInput`；
+- 每次输出：一个 `ReportQuestionResult`；
+- 不与其他 Agent transfer，不管理 Root 的 Task Store；
+- 只回答当前 `report_ref` 对应年报能够支持的问题。
+
+固定执行顺序：
+
+1. 调用 `PrepareReportQuestion`，登记原始问题并开启当前隔离 task 的年报访问；
+2. 将问题拆成必要的检索词，调用 `SearchReport` 扫描完整年报；
+3. 通过 `ReadReportChunks` 读取最少量的相关原文；
+4. 返回 `answered`、`not_found` 或 `ambiguous`，每个 `answered` 结果至少包含一条原文证据；
+5. 调用 `finish_task` 返回结构化结果。
+
+Worker 不得联网、不得根据常识补足年报未披露的信息、不得执行 KPI 数值归一化。遇到规范化 KPI
+请求时应返回 `ambiguous`，说明该请求必须交给 KPI Worker。
+
+### 5.4 Dispatchers
 
 `dispatch_kpi_tasks` 是作为 Root 普通 Tool 暴露的 ADK Workflow：
 
@@ -238,6 +287,8 @@ Worker 不得处理输入范围外的 KPI，也不得凭模型记忆替代 KPI �
 - Worker 因模型生成非法 tool-call JSON 而抛出 `JSONDecodeError` 时，由 ADK node
   `retry_config` 最多执行 3 次（包含首次执行）；
 - 等待所有分支完成，并按输入顺序返回 `list[KpiDispatchOutcome]`；
+- 每个 outcome 在 dispatcher 内部完成 Pydantic 校验；对 Root 模型只暴露浅层 JSON list 返回
+  schema，避免把完整嵌套结果模型重复加入 tool declarations；
 - 不创建或修改 Task Store，不改变 Worker 结果；
 - 一个分支在重试后仍失败时，dispatcher 将该异常转换为该 KPI 的 failed outcome；成功的 sibling
   outcomes 必须保留。dispatcher 自身无法形成 outcome 列表的异常才采用 Workflow fail-fast 语义；
@@ -248,14 +299,21 @@ Worker 不得处理输入范围外的 KPI，也不得凭模型记忆替代 KPI �
 Root 只调用一次 dispatcher，因此不依赖模型生成并行 function calls。并发是确定性的 Workflow
 行为，而不是 prompt 建议。
 
+`answer_report_question` 是单任务 Workflow Tool。它在以 task ID 命名的隔离 scope 中运行一个
+`report_qa_worker`，校验其结构化输出，并把运行异常或空输出转换为失败 outcome。它不写 Task Store。
+其 outcome 同样在 Workflow 内部强类型校验，对 Root 只暴露浅层 JSON object 返回 schema。
+
 Root 和 Worker 的 ADK node 都对模型生成的非法 tool-call JSON 进行有限重试：最多执行 3 次
 （包含首次执行），且只匹配 `JSONDecodeError`。Root 重试用于避免任意规划轮次中的瞬时空白或
 截断参数直接终止 SSE；Worker 重试耗尽后仍由 dispatcher 转换为对应 KPI 的 failed outcome。
 模型响应由 ADK 官方 `LiteLlm` 客户端原样解析，不在应用层改写流式 tool-call arguments。非法或
 截断 JSON 进入上述有限重试；重试耗尽后按对应 Agent 的失败语义处理。服务未返回 usage metadata
 时不得伪造 token 统计，也不得因此中断调用。
+Root instruction 明确要求每轮只调用一个 Tool，并始终生成完整 JSON object；Workflow tool 的返回
+schema 保持浅层，详细结果仍由 dispatcher 内部 Pydantic 模型校验，以减少兼容模型生成空白或截断
+tool arguments 的概率。
 
-### 5.4 Task Progress Plugin
+### 5.5 Task Progress Plugin
 
 `TaskProgressPlugin` 是 ADK App 级插件，只处理横切的任务监督逻辑：
 
@@ -266,7 +324,7 @@ Root 和 Worker 的 ADK node 都对模型生成的非法 tool-call JSON 进行�
 
 Plugin 不创建任务、不调用 Worker、不修改 KPI 结果，也不读取年报。
 
-### 5.5 Large-report Context Strategy
+### 5.6 Large-report Context Strategy
 
 大年报通过“全文在工具侧、证据在上下文内”的方式处理：
 
@@ -277,7 +335,7 @@ Plugin 不创建任务、不调用 Worker、不修改 KPI 结果，也不读取�
 3. **紧凑候选返回**：一次搜索最多返回 8 个候选，每个候选只包含 chunk id、页码、标题、匹配词
    和最多 600 字符的命中窗口。
 4. **受控证据读取**：一次最多读取 3 个已命中的 chunks，单次正文返回总量不超过 18,000 字符。
-5. **Task 隔离**：`parallel_worker` 为每个 KPI 使用独立 branch；一个 Worker 读取过的年报
+5. **Task 隔离**：每个 KPI 或通用问答任务使用独立 branch 和 isolation scope；一个 Worker 读取过的年报
    文本、检索授权和读取预算不会进入另一个 Worker 的上下文。
 6. **累计预算**：每个 task 最多调用 60 次 `SearchReport`、40 次 `ReadReportChunks`，所有
    report tool 返回正文累计不超过 480,000 字符。工具在 state 中确定性计数并拒绝超额调用。
@@ -286,7 +344,7 @@ Plugin 不创建任务、不调用 Worker、不修改 KPI 结果，也不读取�
 8. **预算耗尽时保守结束**：如果在预算内无法解决年份、范围、单位或数值歧义，Worker 返回
    `ambiguous`；不得为了继续读取而突破上下文预算。
 
-### 5.6 Long-conversation Context Compaction
+### 5.7 Long-conversation Context Compaction
 
 所有 LLM Agent 的实际模型请求都通过 `ScopedContextCompactionPlugin`：
 
@@ -306,7 +364,7 @@ event stream，生成的 compaction event 没有当前 `isolation_scope`，会�
 可见上下文。
 
 Context compaction 只是长会话和长工具链的容量保护，不是读取超长年报的正确性机制。
-系统即使关闭 compaction，也必须满足 5.5 的分块和硬预算。
+系统即使关闭 compaction，也必须满足 5.6 的分块和硬预算。
 
 ## 6. Data Models
 
@@ -442,6 +500,38 @@ evidence；`absent` 必须在 notes 中说明已检查的范围。
 Outcome 必须与输入顺序一致。`succeeded` 必须包含且只能包含 `result`；`failed` 必须包含且只能
 包含 `error`。
 
+### 6.6 Report Question Input and Result
+
+```json
+{
+  "task_id": "3",
+  "report_ref": "ACME_2025",
+  "question": "公司认为供应链面临哪些主要风险？"
+}
+```
+
+```json
+{
+  "task_id": "3",
+  "report_ref": "ACME_2025",
+  "question": "公司认为供应链面临哪些主要风险？",
+  "status": "answered",
+  "answer": "公司披露的主要风险包括……",
+  "evidence": [
+    {
+      "chunk_id": "ACME_2025:p31:c0",
+      "page": 31,
+      "heading": "Risk Factors",
+      "text": "Supply disruptions may ..."
+    }
+  ],
+  "notes": []
+}
+```
+
+`status` 只能是 `answered`、`not_found` 或 `ambiguous`。`answered` 必须包含非空 answer 和至少一条
+证据；其他状态的 answer 必须为 `null`，并在 notes 中说明已搜索范围或未能消除的歧义。
+
 ## 7. Tools Required
 
 ### 7.1 Root Tools
@@ -490,6 +580,15 @@ Outcome 必须与输入顺序一致。`succeeded` 必须包含且只能包含 `r
 该 Tool 由 ADK Workflow 提供，内部使用最多 4 路 `parallel_worker`。Root 不得把它与其他 Tool
 放在同一轮并行调用；dispatcher 运行期间不写 Task Store。
 
+#### `answer_report_question`
+
+执行一个已经创建并标记为 `in_progress` 的通用年报问题任务。
+
+输入：一个 `ReportQuestionInput`
+输出：一个 `ReportQuestionOutcome`
+
+该 Tool 在隔离分支中运行 `report_qa_worker`，不写 Task Store，也不修改 Worker 结果。
+
 ### 7.2 Worker Tools
 
 #### `GetKpiKnowledge`
@@ -508,7 +607,8 @@ Outcome 必须与输入顺序一致。`succeeded` 必须包含且只能包含 `r
 输入：`report_ref`, `query`, `cursor`, `limit`
 输出：`scanned_chunks`、`total_matches`、按相关度排序的候选摘要以及可选 `next_cursor`
 
-调用前置条件：当前 task 已成功读取其 KPI knowledge。
+调用前置条件：当前 task 已成功读取其 KPI knowledge，或通用问答 task 已成功调用
+`PrepareReportQuestion`。两种访问上下文不能互相替代。
 
 约束：
 
@@ -526,6 +626,16 @@ Outcome 必须与输入顺序一致。`succeeded` 必须包含且只能包含 `r
 
 约束：一次最多读取 3 个 chunks，返回正文总量最多 18,000 字符；只能读取当前 task 中
 `SearchReport` 返回过的 chunk ids。
+
+#### `PrepareReportQuestion`
+
+登记一个通用问答 task 的原始问题，并开启其隔离 scope 内的年报工具访问。
+
+输入：`report_ref`, `question`
+输出：规范化后的 `report_ref`, `question` 和检索提示
+
+该工具必须校验当前 session manifest 的 `report_ref`；空问题或不匹配的 report ref 被拒绝。它不读取
+年报内容，也不给 KPI Worker 提供 KPI knowledge。
 
 ### 7.3 Authentication
 
@@ -569,11 +679,14 @@ ADK 标准环境配置，不由业务代码管理。
 - Root 不能拥有或调用 Worker tools。
 - Worker 不能拥有或调用 Root task tools。
 - Root 只能通过 `dispatch_kpi_tasks` 运行 Worker，不能直接调用 Worker。
+- Root 只能通过 `answer_report_question` 运行通用问答 Worker，不能直接调用 Worker。
 - Worker 必须是 ADK `mode="task"` Workflow node，必须通过 `finish_task` 返回。
-- 每次 Worker 调用只允许一个 KPI。
+- 每次 KPI Worker 调用只允许一个 KPI；每次通用问答 Worker 调用只允许一个问题。
 - dispatcher 必须使用 ADK 原生 `parallel_worker`，并限制最大并发数。
 - Worker 分支不得直接修改 Root Task Store；Root 的任务更新必须串行。
-- Worker 必须先调用 `GetKpiKnowledge`，再调用任何年报工具。
+- KPI Worker 必须先调用 `GetKpiKnowledge`，通用问答 Worker 必须先调用
+  `PrepareReportQuestion`，之后才能调用任何年报工具。
+- 通用问答 Worker 不能用于规范化 KPI 提取，也不能把无证据回答标记为 `answered`。
 - 工具必须校验 `report_ref`，禁止读取其他 session 或任意文件。
 - 完整年报正文不得出现在 Agent instruction、Task input、conversation history 或搜索结果中。
 - Report tools 必须在返回前执行单次和累计字符预算；不能依赖模型自行节制。
@@ -588,10 +701,11 @@ ADK 标准环境配置，不由业务代码管理。
 
 ### Structural
 
-- App 中恰好存在一个 Root Agent、一个 dispatcher Workflow 和一个 `mode="task"` 的 KPI Worker
-  定义。
-- Root 暴露且仅暴露四个任务工具和一个 `dispatch_kpi_tasks` Workflow Tool。
-- Worker 暴露且仅暴露三个业务工具及 ADK 的 `finish_task`。
+- App 中恰好存在一个 Root Agent、两个 dispatcher Workflow，以及 KPI 和通用问答两个
+  `mode="task"` Worker 定义。
+- Root 暴露且仅暴露四个任务工具、`dispatch_kpi_tasks` 和 `answer_report_question`。
+- KPI Worker 暴露且仅暴露三个业务工具及 ADK 的 `finish_task`；通用问答 Worker 暴露且仅暴露
+  `PrepareReportQuestion`、两个 report tools 及 `finish_task`。
 - 代码库中不存在 KPI-specific Agent、旧兼容层或 benchmark 代码。
 
 ### Behavioral
@@ -606,6 +720,8 @@ ADK 标准环境配置，不由业务代码管理。
 - 最终用户 Web 自动列出 `web/raw-pdf/` 中的 PDF；示例文件和示例问题分开选择，均不自动发送请求。
 - 同一用户跨 session 重复上传相同 PDF 时复用 OCR 缓存；不同用户不能共享缓存。
 - Worker 尝试在读取 KPI knowledge 前搜索年报时会被工具拒绝。
+- 通用问答 Worker 尝试在登记问题前搜索年报时会被工具拒绝。
+- 通用年报问题产生一个任务，并返回至少一条可定位页码的证据；未找到时不能编造回答。
 - Worker 不能读取未经过搜索返回的 chunk。
 - 对大于模型上下文窗口的年报，搜索工具仍能扫描全部 chunks，而单次模型可见的 report tool
   输出不超过规定上限。
@@ -662,6 +778,8 @@ finground/
 ├── kpi_worker.py         # Task-mode Worker and schemas
 ├── kpi_dispatcher.py     # Workflow parallel fan-out/fan-in tool
 ├── kpi_catalog.py        # Read-only KPI knowledge data
+├── report_qa_worker.py   # Task-mode general annual-report question worker
+├── report_qa_dispatcher.py # Isolated single-question Workflow tool
 ├── report_plugin.py      # Markdown attachment ingestion and report manifest
 ├── task_store.py         # Task models and four Root tools
 ├── task_plugin.py        # Progress reminders and completion guard

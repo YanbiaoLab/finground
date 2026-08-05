@@ -513,7 +513,7 @@ function processEventStateDelta(event) {
 }
 
 function workerTaskId(event) {
-  if (event.author !== "kpi_worker" || !event.isolationScope) return null;
+  if (!["kpi_worker", "report_qa_worker"].includes(event.author) || !event.isolationScope) return null;
   const taskId = event.isolationScope.split("/").filter(Boolean).at(-1);
   return state.tasks.some((task) => task.id === taskId) ? taskId : null;
 }
@@ -521,6 +521,7 @@ function workerTaskId(event) {
 function workerPhaseForPart(part) {
   const tool = part.functionCall?.name || part.functionResponse?.name;
   if (tool === "GetKpiKnowledge") return "正在读取 KPI 规则";
+  if (tool === "PrepareReportQuestion") return "正在理解问题";
   if (tool === "SearchReport") return "正在搜索年报";
   if (tool === "ReadReportChunks") return "正在核验证据";
   if (tool === "finish_task") return "结果已返回，等待汇总";

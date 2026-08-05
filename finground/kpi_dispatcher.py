@@ -71,7 +71,7 @@ def _normalized_outcomes(node_input: list[dict[str, Any]]) -> list[dict[str, Any
     return [KpiDispatchOutcome.model_validate(outcome).model_dump() for outcome in node_input]
 
 
-def _root_error_message(error: DynamicNodeFailError) -> str:
+def root_error_message(error: DynamicNodeFailError) -> str:
     root_error: Exception = error
     seen: set[int] = set()
     while isinstance(root_error, DynamicNodeFailError) and id(root_error) not in seen:
@@ -98,7 +98,7 @@ def create_kpi_dispatcher(worker: Agent | None = None) -> Workflow:
                 task_id=node_input.task_id,
                 kpi_key=node_input.kpi_key,
                 status="failed",
-                error=_root_error_message(error),
+                error=root_error_message(error),
             ).model_dump()
         try:
             result = _normalized_result(raw_result)
@@ -127,6 +127,8 @@ def create_kpi_dispatcher(worker: Agent | None = None) -> Workflow:
         name=DISPATCHER_NAME,
         description="Execute independent KPI extraction tasks concurrently.",
         input_schema=KpiTaskBatch,
-        output_schema=list[KpiDispatchOutcome],
+        # Every item is already validated by _normalized_outcomes. Keep the provider-facing
+        # response schema shallow so tool-call models do not receive the full nested result model.
+        output_schema=list[dict[str, Any]],
         edges=[("START", _task_inputs, parallel_worker, _normalized_outcomes)],
     )
