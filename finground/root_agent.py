@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from google.adk.agents import Agent
 
+from finground.config import create_agent_model
 from finground.kpi_dispatcher import DISPATCHER_NAME, create_kpi_dispatcher
-from finground.kpi_worker import MODEL, WORKER_NAME
+from finground.kpi_worker import WORKER_NAME, create_tool_call_retry_config
 from finground.task_plugin import ROOT_AGENT_NAME
 from finground.task_store import task_create, task_get, task_list, task_update
 
@@ -39,9 +40,10 @@ For each requested canonical KPI:
 def create_root_agent(*, worker: Agent | None = None) -> Agent:
     return Agent(
         name=ROOT_AGENT_NAME,
-        model=MODEL,
+        model=create_agent_model(),
         description="A general-purpose coordinator for complex, multi-step work.",
         instruction=ROOT_INSTRUCTION,
+        retry_config=create_tool_call_retry_config(),
         tools=[
             task_create,
             task_list,

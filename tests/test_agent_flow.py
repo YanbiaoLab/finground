@@ -106,6 +106,26 @@ class PartiallyFailingWorkerLlm(BaseLlm):
         )
 
 
+class MalformedRootToolCallLlm(BaseLlm):
+    attempts: ClassVar[int] = 0
+
+    async def generate_content_async(
+        self,
+        llm_request: LlmRequest,
+        stream: bool = False,
+    ) -> AsyncGenerator[LlmResponse]:
+        del llm_request, stream
+        type(self).attempts += 1
+        if type(self).attempts < 3:
+            raise json.JSONDecodeError("Expecting value", " ", 0)
+        yield LlmResponse(
+            content=types.Content(
+                role="model",
+                parts=[types.Part.from_text(text="Recovered after malformed tool call.")],
+            )
+        )
+
+
 def _tool_call(name: str, args: dict) -> types.Content:
     return types.Content(
         role="model",
@@ -494,3 +514,35 @@ def test_dispatcher_retries_and_isolates_one_worker_failure() -> None:
         "result": None,
         "error": "JSONDecodeError: Unterminated string: line 1 column 1 (char 0)",
     }
+
+
+def test_root_retries_malformed_tool_call_json() -> None:
+    async def run() -> list:
+        MalformedRootToolCallLlm.attempts = 0
+        root = create_root_agent()
+        root.model = MalformedRootToolCallLlm(model="malformed-root-tool-call")
+        app = App(name="root_json_retry_test", root_agent=root)
+        sessions = InMemorySessionService()
+        await sessions.create_session(
+            app_name=app.name,
+            user_id="user",
+            session_id="session",
+        )
+        runner = Runner(app=app, session_service=sessions)
+        return [
+            event
+            async for event in runner.run_async(
+                user_id="user",
+                session_id="session",
+                new_message=types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text="Hello")],
+                ),
+            )
+        ]
+
+    events = asyncio.run(run())
+
+    assert MalformedRootToolCallLlm.attempts == 3
+    assert events[-1].is_final_response()
+    assert events[-1].content.parts[0].text == "Recovered after malformed tool call."

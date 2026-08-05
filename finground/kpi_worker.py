@@ -2,20 +2,19 @@
 
 from __future__ import annotations
 
-import os
 from typing import Literal
 
 from google.adk.agents import Agent
 from google.adk.workflow import RetryConfig
 from pydantic import BaseModel, Field, model_validator
 
+from finground.config import create_agent_model
 from finground.kpi_catalog import get_kpi_knowledge_tool
 from finground.report_tools import read_report_chunks_tool, search_report_tool
 
-MODEL = os.getenv("FINGROUND_MODEL", "deepseek/deepseek-v4-flash")
 WORKER_NAME = "kpi_worker"
-WORKER_MAX_ATTEMPTS = 3
-WORKER_RETRY_INITIAL_DELAY = 0.1
+TOOL_CALL_MAX_ATTEMPTS = 3
+TOOL_CALL_RETRY_INITIAL_DELAY = 0.1
 
 
 class KpiTaskInput(BaseModel):
@@ -83,23 +82,28 @@ Do not process another KPI and do not call root task-management tools.
 """
 
 
+def create_tool_call_retry_config() -> RetryConfig:
+    """Retry transient malformed model tool-call arguments at the ADK node boundary."""
+    return RetryConfig(
+        max_attempts=TOOL_CALL_MAX_ATTEMPTS,
+        initial_delay=TOOL_CALL_RETRY_INITIAL_DELAY,
+        max_delay=TOOL_CALL_RETRY_INITIAL_DELAY,
+        backoff_factor=1.0,
+        jitter=0.0,
+        exceptions=["JSONDecodeError"],
+    )
+
+
 def create_kpi_worker() -> Agent:
     return Agent(
         name=WORKER_NAME,
-        model=MODEL,
+        model=create_agent_model(),
         mode="task",
         description="Extracts one KPI from a large annual report with bounded, auditable evidence.",
         instruction=WORKER_INSTRUCTION,
         input_schema=KpiTaskInput,
         output_schema=KpiTaskResult,
-        retry_config=RetryConfig(
-            max_attempts=WORKER_MAX_ATTEMPTS,
-            initial_delay=WORKER_RETRY_INITIAL_DELAY,
-            max_delay=WORKER_RETRY_INITIAL_DELAY,
-            backoff_factor=1.0,
-            jitter=0.0,
-            exceptions=["JSONDecodeError"],
-        ),
+        retry_config=create_tool_call_retry_config(),
         tools=[get_kpi_knowledge_tool, search_report_tool, read_report_chunks_tool],
         disallow_transfer_to_parent=True,
         disallow_transfer_to_peers=True,

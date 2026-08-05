@@ -27,6 +27,14 @@ KPI 输入、Worker 结果和错误只作为任务 `metadata`，不进入任务�
 本阶段只实现本地原型。部署、CI/CD、外部数据库、向量检索、SEC/XBRL 数据和 benchmark
 框架均不在范围内。
 
+本地原型同时提供一个面向最终用户的对话式 Web 页面。它复用 ADK 的 session、artifact 和
+`/run_sse` 接口，支持多轮对话、附件、历史 session 和实时任务进度，但不展示 thought、原始
+tool call、trace 或 performance warning 等开发调试信息。KPI 提取是对话中可发起的一类任务，
+不是固定表单或唯一页面流程；ADK Web 继续只用于开发调试。页面按照 ADK 事件的 `partial`
+语义合并流式文本，并以最终非 partial 事件替换对应的临时输出，不能把两者重复追加。
+消息正文支持安全的 Markdown 标题、列表、代码块和 GFM 表格；KPI 结果表使用语义化状态徽标，
+证据列允许换行，窄屏或超宽内容通过表格容器横向滚动，不能把 Markdown 分隔符作为正文展示。
+
 ## 2. Goals
 
 - 使用 ADK 原生混合编排：一个自由规划的 Root、一个 Workflow dispatcher、一个 task-mode
@@ -38,6 +46,7 @@ KPI 输入、Worker 结果和错误只作为任务 `metadata`，不进入任务�
 - 每个结果必须包含来源证据，不能只返回数值。
 - 任务进度可查询，Root 不能在仍有未完成任务时宣称全部完成。
 - 代码和状态模型保持最小，不为未来需求预建抽象层。
+- 最终用户无需理解 Agent、Tool 或 Task Store，即可通过自然语言持续提出任务、上传资料并复核结果。
 
 ## 3. Non-goals
 
@@ -68,8 +77,22 @@ KPI 输入、Worker 结果和错误只作为任务 `metadata`，不进入任务�
 - `kpis`：规范化 KPI key 列表。
 
 ADK Web 用户可以直接把 UTF-8 Markdown 或 PDF 年报附加到消息。PDF 会在插件侧逐页渲染、默认
-每 20 页一批通过 OpenAI 兼容的 Unlimited-OCR 服务转成 Markdown；批次返回无法按页拆分时，
-该批次自动降级为逐页 OCR。`ReportUploadPlugin` 在 Root 调用模型前将
+每 20 页一批通过 OpenAI 兼容的 Unlimited-OCR 服务转成 Markdown。渲染与远端 OCR 按批次流水线执行，
+默认最多并行 8 个请求；多页使用 `base` 模式，拆分到单页时使用 `gundam` 模式。批次输出无法可靠按页
+映射时递归二分，只在最后必要时退化到单页；批次响应截断时保留已完整返回的页面，只重试未完成尾部。
+单页响应达到 8,192 token 输出上限时，只对该页使用 24,576 token 预算重试一次；重试仍截断则拒绝
+整份结果，不能保存不完整年报。多页请求超时时同样递归二分为更小批次，单页请求超时时只重试一次；
+最终错误必须包含 HTTP 异常类型、超时配置和起始页码，不能因底层异常消息为空而丢失诊断信息。
+`ReadError` 等瞬时传输错误先对原请求重试一次；多页请求仍失败时最多额外二分一次，避免网络整体
+故障引发指数级请求。OCR HTTP 客户端默认不继承系统代理；只有明确设置
+`FINGROUND_OCR_TRUST_ENV=true` 时才读取代理环境变量。
+
+成功的 PDF OCR Markdown 以 PDF SHA-256 和输出相关 OCR 配置的指纹作为缓存键，保存为当前用户范围的
+ADK artifact。同一用户跨 session 上传内容相同的 PDF 时直接复用缓存，不跨用户共享；文件名变化不影响
+命中。模型、服务地址、渲染 DPI、批大小、页数限制或 `FINGROUND_OCR_CACHE_VERSION` 变化时缓存自动
+失效。失败、空内容和截断结果不能写入缓存；缓存读取或写入失败必须降级为正常 OCR，不能阻断上传。
+
+`ReportUploadPlugin` 在 Root 调用模型前将
 Markdown/OCR 结果保存为 ADK artifact、从文件名生成稳定 `report_ref`、写入 session manifest，并用一条
 只包含 artifact 名称和 report_ref 的短占位文本替换原始附件。完整正文不会进入模型上下文。
 程序化调用也可以预先保存 Markdown 或分块 JSONL artifact 并设置相同 manifest：
@@ -129,6 +152,7 @@ TaskProgressPlugin
 
 ReportUploadPlugin
   ├── saves Markdown chat attachments as session artifacts
+  ├── reuses successful PDF OCR from user-scoped content-addressed artifacts
   ├── replaces full attachment content with a short report reference
   └── initializes the current report manifest
 
@@ -200,6 +224,10 @@ Worker 不得处理输入范围外的 KPI，也不得凭模型记忆替代 KPI �
 
 Root 只调用一次 dispatcher，因此不依赖模型生成并行 function calls。并发是确定性的 Workflow
 行为，而不是 prompt 建议。
+
+Root 和 Worker 的 ADK node 都对模型生成的非法 tool-call JSON 进行有限重试：最多执行 3 次
+（包含首次执行），且只匹配 `JSONDecodeError`。Root 重试用于避免任意规划轮次中的瞬时空白或
+截断参数直接终止 SSE；Worker 重试耗尽后仍由 dispatcher 转换为对应 KPI 的 failed outcome。
 
 ### 5.4 Task Progress Plugin
 
@@ -479,6 +507,16 @@ Outcome 必须与输入顺序一致。`succeeded` 必须包含且只能包含 `r
 artifact service 读取 manifest 指定的年报 artifact。它们都不需要外部业务认证。模型认证沿用
 ADK 标准环境配置，不由业务代码管理。
 
+运行时配置只从环境变量读取，不在源码中保存模型地址、模型名称或密钥：
+
+- `FINGROUND_MODEL`、`FINGROUND_MODEL_BASE_URL`、`FINGROUND_MODEL_API_KEY`：Root、Worker 和
+  上下文摘要共用的 OpenAI-compatible 模型配置，三项均为必需；
+- `FINGROUND_OCR_BASE_URL`、`FINGROUND_OCR_MODEL`：PDF OCR 地址与模型，均为必需；
+- `FINGROUND_OCR_API_KEY`：OCR 鉴权密钥，可为空以支持无鉴权的本地服务；
+- 其余 OCR 超时、并发、批大小、渲染和缓存参数继续使用 `FINGROUND_OCR_*` 环境变量。
+
+仓库只提交 `.env.example` 的非敏感占位配置；`.env` 和所有实际密钥由 `.gitignore` 排除。
+
 ## 8. End-to-End Workflow
 
 以请求 `revenue` 和 `net_income` 为例：
@@ -531,9 +569,11 @@ ADK 标准环境配置，不由业务代码管理。
 - 一个两 KPI 请求产生两个独立任务。
 - 一个多 KPI 请求只调用一次 dispatcher；dispatcher 确实同时运行多个 Worker，最大并发数为 4，
   并按输入顺序返回 outcomes。
-- 单个 Worker 的非法 tool-call JSON 最多尝试 3 次；最终失败不得丢弃已成功的 sibling outcomes。
+- Root 或单个 Worker 的非法 tool-call JSON 最多尝试 3 次；Worker 最终失败不得丢弃已成功的
+  sibling outcomes。
 - ADK Web 消息中的 Markdown 附件会自动保存为 artifact、初始化 report manifest，并从模型输入
   中移除完整正文。
+- 同一用户跨 session 重复上传相同 PDF 时只执行一次 OCR；不同用户不能共享该缓存。
 - Worker 尝试在读取 KPI knowledge 前搜索年报时会被工具拒绝。
 - Worker 不能读取未经过搜索返回的 chunk。
 - 对大于模型上下文窗口的年报，搜索工具仍能扫描全部 chunks，而单次模型可见的 report tool
@@ -572,7 +612,11 @@ ADK 标准环境配置，不由业务代码管理。
 - 单位缺失或作用范围不清：不得推断单位，返回 ambiguous。
 - Task-mode Worker 生成非法 tool-call JSON：ADK node 最多尝试 3 次；仍失败时只将该项
   错误记入 metadata 并返回 pending，不回滚成功 sibling。
+- Root 生成空白、截断或其他非法 tool-call JSON：ADK node 最多尝试 3 次；不得立即终止 SSE。
 - 部分 KPI 成功、部分未完成：Root 返回部分结果和明确的失败清单。
+- PDF OCR 缓存损坏、不可读或写入失败：忽略缓存并完成正常 OCR 流程；不得缓存失败或截断输出。
+- 多页 OCR 超时：自动缩小批次继续执行；单页连续两次超时后返回包含异常类型、超时值和页码的错误。
+- OCR 连接中断：原请求有限重试，多页最多额外二分一次；永久 HTTP 错误和非法响应不得盲目重试。
 
 ## 12. Minimal Project Layout
 
@@ -580,6 +624,7 @@ ADK 标准环境配置，不由业务代码管理。
 finground/
 ├── __init__.py
 ├── agent.py              # ADK root_agent and App entry point
+├── config.py             # Environment-backed model and service configuration
 ├── root_agent.py         # Root definition and instruction
 ├── kpi_worker.py         # Task-mode Worker and schemas
 ├── kpi_dispatcher.py     # Workflow parallel fan-out/fan-in tool
@@ -588,6 +633,11 @@ finground/
 ├── task_store.py         # Task models and four Root tools
 ├── task_plugin.py        # Progress reminders and completion guard
 └── report_tools.py       # Artifact-backed full scan and bounded chunk reads
+
+web/
+├── index.html            # 最终用户对话页面
+├── styles.css            # 响应式视觉样式
+└── app.js                # ADK session、SSE、附件、消息与任务进度交互
 
 tests/
 ├── test_architecture.py

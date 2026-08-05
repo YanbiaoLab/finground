@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import logging
 import re
 from pathlib import PurePath
 from typing import Any
@@ -19,6 +21,9 @@ from finground.report_tools import REPORT_STATE_KEY
 _PENDING_ARTIFACTS_KEY = "temp:report_upload_artifacts"
 _PENDING_MANIFEST_KEY = "temp:report_upload_manifest"
 _PAGE_BREAK = re.compile(r"<---\s*Page Split\s*--->", re.IGNORECASE)
+_OCR_CACHE_ROOT = "user:.finground/ocr"
+
+logger = logging.getLogger(__name__)
 
 
 def _is_markdown(blob: types.Blob) -> bool:
@@ -44,12 +49,78 @@ def _report_ref(filename: str) -> str:
     return normalized or "report"
 
 
+def _ocr_cache_filename(pdf_data: bytes, fingerprint: str) -> str:
+    pdf_digest = hashlib.sha256(pdf_data).hexdigest()
+    settings_digest = hashlib.sha256(fingerprint.encode()).hexdigest()[:16]
+    return f"{_OCR_CACHE_ROOT}/{settings_digest}/{pdf_digest}.md"
+
+
+def _cached_markdown(artifact: types.Part | None) -> str | None:
+    if artifact is None:
+        return None
+    if artifact.text:
+        return artifact.text
+    blob = artifact.inline_data
+    if blob is None or blob.mime_type not in {"text/markdown", "text/x-markdown"}:
+        return None
+    try:
+        text = blob.data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return text or None
+
+
 class ReportUploadPlugin(BasePlugin):
     """Save uploaded Markdown reports and make the latest one current."""
 
     def __init__(self, ocr_client: VllmPdfOcrClient | None = None) -> None:
         super().__init__(name="report_upload")
         self._ocr_client = ocr_client or VllmPdfOcrClient()
+
+    async def _pdf_to_markdown(
+        self,
+        invocation_context: InvocationContext,
+        pdf_data: bytes,
+    ) -> tuple[str, int]:
+        artifact_service = invocation_context.artifact_service
+        if artifact_service is None:
+            raise RuntimeError("an artifact service is required for report uploads")
+        cache_filename = _ocr_cache_filename(
+            pdf_data,
+            self._ocr_client.cache_fingerprint(),
+        )
+        try:
+            cached_artifact = await artifact_service.load_artifact(
+                app_name=invocation_context.app_name,
+                user_id=invocation_context.user_id,
+                session_id=invocation_context.session.id,
+                filename=cache_filename,
+            )
+        except Exception:  # noqa: BLE001 - cache failure must not block OCR
+            logger.warning("Unable to read PDF OCR cache", exc_info=True)
+            cached_artifact = None
+        cached_text = _cached_markdown(cached_artifact)
+        if cached_text is not None:
+            return cached_text, len(_PAGE_BREAK.split(cached_text))
+
+        text, total_pages = await self._ocr_client.pdf_to_markdown(pdf_data)
+        cache_artifact = types.Part(
+            inline_data=types.Blob(
+                data=text.encode("utf-8"),
+                mime_type="text/markdown",
+            )
+        )
+        try:
+            await artifact_service.save_artifact(
+                app_name=invocation_context.app_name,
+                user_id=invocation_context.user_id,
+                session_id=invocation_context.session.id,
+                filename=cache_filename,
+                artifact=cache_artifact,
+            )
+        except Exception:  # noqa: BLE001 - cache failure must not discard OCR output
+            logger.warning("Unable to write PDF OCR cache", exc_info=True)
+        return text, total_pages
 
     async def on_user_message_callback(
         self,
@@ -80,7 +151,10 @@ class ReportUploadPlugin(BasePlugin):
                 continue
             filename = _safe_filename(blob, invocation_context.invocation_id, index)
             if _is_pdf(blob):
-                text, total_pages = await self._ocr_client.pdf_to_markdown(blob.data)
+                text, total_pages = await self._pdf_to_markdown(
+                    invocation_context,
+                    blob.data,
+                )
                 filename = f"{PurePath(filename).stem}.ocr.md"
                 artifact_part = types.Part(
                     inline_data=types.Blob(

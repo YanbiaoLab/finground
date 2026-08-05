@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="FinGround 对话式财务研究助手" />
+    <title>FinGround · 财务研究助手</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M6 23V13h5v10H6Zm8 0V7h5v16h-5Zm8 0V3h5v20h-5Z" /></svg></span>
+          <span>FinGround</span>
+        </div>
+
+        <button class="new-chat" id="newChatButton" type="button">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12" /></svg>
+          新对话
+        </button>
+
+        <section class="history-section" aria-labelledby="historyTitle">
+          <div class="sidebar-label" id="historyTitle">最近对话</div>
+          <div class="history-list" id="historyList"><div class="history-empty">还没有对话记录</div></div>
+        </section>
+
+        <div class="sidebar-footer">
+          <span class="status-dot"></span>
+          <span>本地工作区</span>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <button class="icon-button menu-button" id="menuButton" type="button" aria-label="打开菜单">
+            <svg viewBox="0 0 20 20"><path d="M3 5h14M3 10h14M3 15h14" /></svg>
+          </button>
+          <div class="agent-avatar small" aria-hidden="true"><span></span></div>
+          <div class="agent-identity">
+            <strong>FinGround</strong>
+            <span><i></i> 财务研究助手</span>
+          </div>
+          <button class="tasks-button hidden" id="tasksButton" type="button">
+            <svg viewBox="0 0 20 20"><path d="M4 5h2v2H4V5Zm5 1h7M4 9h2v2H4V9Zm5 1h7M4 13h2v2H4v-2Zm5 1h7" /></svg>
+            <span id="tasksButtonLabel">任务</span>
+          </button>
+        </header>
+
+        <div class="conversation-layout">
+          <section class="conversation" id="conversation">
+            <div class="welcome" id="welcome">
+              <div class="agent-avatar hero-avatar" aria-hidden="true"><span></span></div>
+              <span class="eyebrow">FINANCIAL RESEARCH, GROUNDED</span>
+              <h1>今天想研究什么？</h1>
+              <p>我可以拆解复杂任务、读取年报并提取带证据的财务指标。直接描述目标，也可以附上 PDF 或 Markdown 文件。</p>
+              <div class="suggestions" id="suggestions">
+                <button type="button" data-prompt="请从我上传的年报中提取 FY2017 的 revenue、gross_profit、operating_income、net_income 和 operating_cash_flow，并附上原文证据。">
+                  <span class="suggestion-icon green"><svg viewBox="0 0 22 22"><path d="M5 17V9h3v8H5Zm5 0V5h3v12h-3Zm5 0v-6h3v6h-3Z" /></svg></span>
+                  <span><strong>提取多个 KPI</strong><small>从年报中查找并核对财务指标</small></span>
+                  <svg class="arrow" viewBox="0 0 20 20"><path d="M5 10h10m-4-4 4 4-4 4" /></svg>
+                </button>
+                <button type="button" data-prompt="请帮我规划这项财务研究工作，拆分任务并持续汇报进度：">
+                  <span class="suggestion-icon amber"><svg viewBox="0 0 22 22"><path d="M6 5h10M6 11h10M6 17h7M3 5h.1M3 11h.1M3 17h.1" /></svg></span>
+                  <span><strong>规划复杂研究</strong><small>把目标拆成可追踪、可重试的任务</small></span>
+                  <svg class="arrow" viewBox="0 0 20 20"><path d="M5 10h10m-4-4 4 4-4 4" /></svg>
+                </button>
+              </div>
+            </div>
+
+            <div class="messages hidden" id="messages" aria-live="polite"></div>
+
+            <div class="composer-wrap">
+              <div class="attachment-preview hidden" id="attachmentPreview">
+                <span class="attachment-type" id="attachmentType">PDF</span>
+                <span class="attachment-copy"><strong id="attachmentName"></strong><small id="attachmentSize"></small></span>
+                <button class="icon-button" id="removeAttachmentButton" type="button" aria-label="移除附件"><svg viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15" /></svg></button>
+              </div>
+              <div class="composer" id="composer">
+                <textarea id="messageInput" rows="1" placeholder="给 FinGround 发消息…" aria-label="消息"></textarea>
+                <div class="composer-actions">
+                  <input id="fileInput" type="file" accept=".pdf,.md,.markdown,application/pdf,text/markdown" hidden />
+                  <button class="icon-button attach-button" id="attachButton" type="button" aria-label="添加附件" title="添加 PDF 或 Markdown">
+                    <svg viewBox="0 0 20 20"><path d="M7 10.5 11.8 5.7a2.4 2.4 0 0 1 3.4 3.4l-6.4 6.4a3.8 3.8 0 0 1-5.4-5.4l6.1-6.1" /></svg>
+                  </button>
+                  <span class="composer-hint">Enter 发送 · Shift + Enter 换行</span>
+                  <button class="send-button" id="sendButton" type="button" aria-label="发送" disabled>
+                    <svg viewBox="0 0 20 20"><path d="M4 10h12m-4-4 4 4-4 4" /></svg>
+                  </button>
+                </div>
+              </div>
+              <p class="disclaimer">FinGround 可能会出错。重要数据请根据提供的原文证据复核。</p>
+            </div>
+          </section>
+
+          <aside class="task-drawer" id="taskDrawer" aria-labelledby="taskDrawerTitle" aria-hidden="true">
+            <div class="task-drawer-header">
+              <div><span class="eyebrow">LIVE PROGRESS</span><h2 id="taskDrawerTitle">任务进度</h2></div>
+              <button class="icon-button" id="closeTasksButton" type="button" aria-label="关闭任务面板"><svg viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15" /></svg></button>
+            </div>
+            <div class="task-progress" id="taskProgress">
+              <div class="progress-ring"><span id="progressValue">0%</span></div>
+              <div><strong id="progressTitle">尚无任务</strong><span id="progressMeta">复杂工作会在这里显示实时状态</span></div>
+            </div>
+            <div class="task-list" id="taskList"><div class="task-empty">发送一个复杂任务后，执行计划会出现在这里。</div></div>
+          </aside>
+        </div>
+      </main>
+    </div>
+    <div class="toast hidden" id="toast" role="status"></div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

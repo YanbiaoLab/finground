@@ -15,8 +15,16 @@ from finground.report_plugin import ReportUploadPlugin
 
 
 class StubOcrClient:
+    def __init__(self, cache_version: str = "stub-v1") -> None:
+        self.cache_version = cache_version
+        self.calls = 0
+
+    def cache_fingerprint(self) -> str:
+        return self.cache_version
+
     async def pdf_to_markdown(self, pdf_data: bytes) -> tuple[str, int]:
         assert pdf_data == b"fake pdf"
+        self.calls += 1
         return "# Page one\n\nRevenue 123\n\n<--- Page Split --->\n\n# Page two", 2
 
 
@@ -165,3 +173,71 @@ def test_pdf_attachment_is_ocrd_into_markdown_artifact() -> None:
     user_event = next(event for event in events if event.author == "user")
     assert all(part.inline_data is None for part in user_event.content.parts)
     assert 'report_ref "AAP_2017_ocr"' in user_event.content.parts[1].text
+
+
+def test_pdf_ocr_cache_is_reused_across_sessions_but_not_users() -> None:
+    async def run() -> tuple[int, types.Part, list[str]]:
+        ocr_client = StubOcrClient()
+        root = Agent(
+            name="root",
+            model=FinalResponseLlm(model="scripted"),
+            instruction="Acknowledge the uploaded report.",
+        )
+        app = App(
+            name="pdf_cache_test",
+            root_agent=root,
+            plugins=[ReportUploadPlugin(ocr_client=ocr_client)],
+        )
+        sessions = InMemorySessionService()
+        artifacts = InMemoryArtifactService()
+        runner = Runner(app=app, session_service=sessions, artifact_service=artifacts)
+
+        uploads = (
+            ("user", "one", "first.pdf"),
+            ("user", "two", "renamed.pdf"),
+            ("other-user", "three", "same.pdf"),
+        )
+        for user_id, session_id, filename in uploads:
+            await sessions.create_session(
+                app_name=app.name,
+                user_id=user_id,
+                session_id=session_id,
+            )
+            _ = [
+                event
+                async for event in runner.run_async(
+                    user_id=user_id,
+                    session_id=session_id,
+                    new_message=types.Content(
+                        role="user",
+                        parts=[
+                            types.Part(
+                                inline_data=types.Blob(
+                                    data=b"fake pdf",
+                                    mime_type="application/pdf",
+                                    display_name=filename,
+                                )
+                            )
+                        ],
+                    ),
+                )
+            ]
+
+        second_artifact = await artifacts.load_artifact(
+            app_name=app.name,
+            user_id="user",
+            session_id="two",
+            filename="renamed.ocr.md",
+        )
+        keys = await artifacts.list_artifact_keys(
+            app_name=app.name,
+            user_id="user",
+            session_id="two",
+        )
+        return ocr_client.calls, second_artifact, keys
+
+    calls, artifact, keys = asyncio.run(run())
+
+    assert calls == 2
+    assert b"Revenue 123" in artifact.inline_data.data
+    assert any(key.startswith("user:.finground/ocr/") for key in keys)

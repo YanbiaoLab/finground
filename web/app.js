@@ -1,0 +1,646 @@
+const APP_NAME = "finground";
+const USER_STORAGE_KEY = "finground-user-id";
+const MAX_FILE_BYTES = 100 * 1024 * 1024;
+
+const state = {
+  userId: getOrCreateUserId(),
+  sessionId: null,
+  attachment: null,
+  tasks: [],
+  running: false,
+  taskDrawerOpen: false,
+  openedTasksForRun: false,
+  activeAssistantContent: null,
+  activeProgress: null,
+};
+
+const ids = [
+  "sidebar", "menuButton", "newChatButton", "historyList", "welcome", "messages", "messageInput",
+  "fileInput", "attachButton", "sendButton", "attachmentPreview", "attachmentType", "attachmentName",
+  "attachmentSize", "removeAttachmentButton", "suggestions", "tasksButton", "tasksButtonLabel",
+  "taskDrawer", "closeTasksButton", "taskProgress", "progressValue", "progressTitle", "progressMeta",
+  "taskList", "conversation", "toast",
+];
+const elements = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
+
+function getOrCreateUserId() {
+  let value = localStorage.getItem(USER_STORAGE_KEY);
+  if (!value) {
+    value = `local-${crypto.randomUUID()}`;
+    localStorage.setItem(USER_STORAGE_KEY, value);
+  }
+  return value;
+}
+
+function escapeHtml(value = "") {
+  const node = document.createElement("div");
+  node.textContent = String(value);
+  return node.innerHTML;
+}
+
+function renderInlineMarkdown(value = "") {
+  const codeSpans = [];
+  const source = String(value).replace(/`([^`\n]+)`/g, (_, code) => {
+    const token = `\uE000${codeSpans.length}\uE001`;
+    codeSpans.push(code);
+    return token;
+  });
+  let html = escapeHtml(source)
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([^_]+)__/g, "<strong>$1</strong>");
+  codeSpans.forEach((code, index) => {
+    html = html.replace(`\uE000${index}\uE001`, `<code>${escapeHtml(code)}</code>`);
+  });
+  return html;
+}
+
+function splitTableRow(line) {
+  let source = line.trim();
+  if (source.startsWith("|")) source = source.slice(1);
+  if (source.endsWith("|")) source = source.slice(0, -1);
+  const cells = [];
+  let cell = "";
+  for (let index = 0; index < source.length; index += 1) {
+    if (source[index] === "\\" && source[index + 1] === "|") {
+      cell += "|";
+      index += 1;
+    } else if (source[index] === "|") {
+      cells.push(cell.trim());
+      cell = "";
+    } else {
+      cell += source[index];
+    }
+  }
+  cells.push(cell.trim());
+  return cells;
+}
+
+function tableAlignments(line) {
+  const cells = splitTableRow(line);
+  if (!cells.length || !cells.every((cell) => /^:?-{3,}:?$/.test(cell))) return null;
+  return cells.map((cell) => {
+    if (cell.startsWith(":") && cell.endsWith(":")) return "center";
+    if (cell.endsWith(":")) return "right";
+    return "left";
+  });
+}
+
+function normalizedTableRow(cells, columnCount) {
+  if (cells.length <= columnCount) {
+    return [...cells, ...Array(columnCount - cells.length).fill("")];
+  }
+  return [...cells.slice(0, columnCount - 1), cells.slice(columnCount - 1).join(" | ")];
+}
+
+function renderTable(lines, start) {
+  const headers = splitTableRow(lines[start]);
+  const alignments = tableAlignments(lines[start + 1]);
+  const statusColumn = headers.findIndex((header) => /^(状态|status)$/i.test(header.trim()));
+  const kpiColumn = headers.findIndex((header) => /^kpi$/i.test(header.trim()));
+  const rows = [];
+  let index = start + 2;
+  while (index < lines.length && lines[index].trim() && lines[index].includes("|")) {
+    rows.push(normalizedTableRow(splitTableRow(lines[index]), headers.length));
+    index += 1;
+  }
+  const cell = (value, column, tag) => {
+    const alignment = alignments?.[column] || "left";
+    let content = renderInlineMarkdown(value);
+    let className = `align-${alignment}`;
+    if (tag === "td" && column === statusColumn) {
+      const status = value.trim().toLowerCase();
+      const knownStatus = ["found", "absent", "ambiguous", "explicit_zero"].includes(status);
+      content = `<span class="status-badge ${knownStatus ? status : "neutral"}">${content}</span>`;
+      className += " status-column";
+    }
+    if (tag === "td" && column === kpiColumn) className += " kpi-column";
+    return `<${tag} class="${className}">${content}</${tag}>`;
+  };
+  const head = headers.map((header, column) => cell(header, column, "th")).join("");
+  const body = rows.map((row) => `<tr>${row.map((value, column) => cell(value, column, "td")).join("")}</tr>`).join("");
+  return {
+    html: `<div class="markdown-table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`,
+    nextIndex: index,
+  };
+}
+
+function renderMarkdown(value = "") {
+  const lines = String(value).replace(/\r\n?/g, "\n").split("\n");
+  const blocks = [];
+  const isTableStart = (index) => index + 1 < lines.length
+    && lines[index].includes("|")
+    && tableAlignments(lines[index + 1]) !== null;
+  const isBlockStart = (index) => /^```|^#{1,6}\s+|^\s*[-*+]\s+|^\s*\d+\.\s+/.test(lines[index])
+    || isTableStart(index);
+
+  for (let index = 0; index < lines.length;) {
+    const line = lines[index];
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+    if (line.startsWith("```")) {
+      const code = [];
+      index += 1;
+      while (index < lines.length && !lines[index].startsWith("```")) {
+        code.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      blocks.push(`<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`);
+      continue;
+    }
+    if (isTableStart(index)) {
+      const table = renderTable(lines, index);
+      blocks.push(table.html);
+      index = table.nextIndex;
+      continue;
+    }
+    const heading = line.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      const level = Math.min(heading[1].length + 1, 6);
+      blocks.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+      index += 1;
+      continue;
+    }
+    const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
+    if (unordered) {
+      const items = [];
+      while (index < lines.length) {
+        const item = lines[index].match(/^\s*[-*+]\s+(.+)$/);
+        if (!item) break;
+        items.push(`<li>${renderInlineMarkdown(item[1])}</li>`);
+        index += 1;
+      }
+      blocks.push(`<ul>${items.join("")}</ul>`);
+      continue;
+    }
+    const ordered = line.match(/^\s*\d+\.\s+(.+)$/);
+    if (ordered) {
+      const items = [];
+      while (index < lines.length) {
+        const item = lines[index].match(/^\s*\d+\.\s+(.+)$/);
+        if (!item) break;
+        items.push(`<li>${renderInlineMarkdown(item[1])}</li>`);
+        index += 1;
+      }
+      blocks.push(`<ol>${items.join("")}</ol>`);
+      continue;
+    }
+    const paragraph = [line];
+    index += 1;
+    while (index < lines.length && lines[index].trim() && !isBlockStart(index)) {
+      paragraph.push(lines[index]);
+      index += 1;
+    }
+    blocks.push(`<p>${paragraph.map(renderInlineMarkdown).join("<br>")}</p>`);
+  }
+  return blocks.join("");
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function showToast(message) {
+  elements.toast.textContent = message;
+  elements.toast.classList.remove("hidden");
+  clearTimeout(showToast.timer);
+  showToast.timer = setTimeout(() => elements.toast.classList.add("hidden"), 3600);
+}
+
+async function request(url, options = {}) {
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    let message = `${response.status} ${response.statusText}`;
+    try {
+      const body = await response.json();
+      message = body.detail || body.error || message;
+    } catch (_) { /* non-JSON response */ }
+    throw new Error(message);
+  }
+  if (response.status === 204) return null;
+  return response.json();
+}
+
+function sessionUrl(sessionId) {
+  return `/apps/${APP_NAME}/users/${encodeURIComponent(state.userId)}/sessions/${encodeURIComponent(sessionId)}`;
+}
+
+async function createSession() {
+  return request(`/apps/${APP_NAME}/users/${encodeURIComponent(state.userId)}/sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId: crypto.randomUUID() }),
+  });
+}
+
+function ensureConversationVisible() {
+  elements.welcome.classList.add("hidden");
+  elements.messages.classList.remove("hidden");
+}
+
+function scrollToLatest() {
+  requestAnimationFrame(() => { elements.messages.scrollTop = elements.messages.scrollHeight; });
+}
+
+function fileBadge(fileName) {
+  return fileName.toLowerCase().endsWith(".pdf") ? "PDF" : "MD";
+}
+
+function addUserMessage(text, file = null) {
+  ensureConversationVisible();
+  const article = document.createElement("article");
+  article.className = "message user";
+  const body = document.createElement("div");
+  body.className = "message-body";
+  if (file) {
+    const fileNode = document.createElement("div");
+    fileNode.className = "message-file";
+    fileNode.innerHTML = `<span class="attachment-type">${fileBadge(file.name)}</span><span>${escapeHtml(file.name)}</span>`;
+    body.append(fileNode);
+  }
+  const content = document.createElement("div");
+  content.className = "message-content";
+  content.innerHTML = renderMarkdown(text);
+  body.append(content);
+  article.append(body);
+  elements.messages.append(article);
+  scrollToLatest();
+}
+
+function addAssistantMessage({ thinking = false } = {}) {
+  ensureConversationVisible();
+  const article = document.createElement("article");
+  article.className = "message assistant";
+  article.innerHTML = `<div class="message-avatar">FG</div><div class="message-body"><div class="assistant-label">FinGround</div><div class="message-content"></div></div>`;
+  const content = article.querySelector(".message-content");
+  if (thinking) content.innerHTML = `<div class="thinking"><span class="thinking-dots"><i></i><i></i><i></i></span><span>正在理解你的请求…</span></div>`;
+  elements.messages.append(article);
+  scrollToLatest();
+  return {
+    article,
+    body: article.querySelector(".message-body"),
+    content,
+    text: "",
+    partialStream: null,
+  };
+}
+
+function renderAssistantMessage(message) {
+  message.content.innerHTML = renderMarkdown(message.text);
+  scrollToLatest();
+}
+
+function appendAssistantText(message, addition) {
+  if (!addition) return;
+  message.partialStream = null;
+  message.text += addition;
+  renderAssistantMessage(message);
+}
+
+function updateAssistantEvent(message, event) {
+  const addition = eventText(event);
+  if (!addition) return;
+  const streamKey = `${event.invocationId || "current"}:${event.author}`;
+
+  if (event.partial) {
+    if (!message.partialStream || message.partialStream.key !== streamKey) {
+      message.partialStream = { key: streamKey, prefix: message.text, text: "" };
+    }
+    message.partialStream.text += addition;
+    message.text = message.partialStream.prefix + message.partialStream.text;
+    renderAssistantMessage(message);
+    return;
+  }
+
+  if (message.partialStream?.key === streamKey) {
+    // ADK's non-partial event is the complete version of the current
+    // streamed response. Replace that stream instead of appending it.
+    message.text = message.partialStream.prefix + addition;
+  } else {
+    message.text += addition;
+  }
+  message.partialStream = null;
+  renderAssistantMessage(message);
+}
+
+function addHistoricalAssistant(text) {
+  const message = addAssistantMessage();
+  message.text = text;
+  message.content.innerHTML = renderMarkdown(text);
+}
+
+function setAttachment(file) {
+  if (!file) return;
+  const lowerName = file.name.toLowerCase();
+  const supported = lowerName.endsWith(".pdf") || lowerName.endsWith(".md") || lowerName.endsWith(".markdown");
+  if (!supported) return showToast("目前支持 PDF 或 Markdown 附件");
+  if (file.size > MAX_FILE_BYTES) return showToast("附件不能超过 100 MB");
+  state.attachment = file;
+  elements.attachmentType.textContent = fileBadge(file.name);
+  elements.attachmentName.textContent = file.name;
+  elements.attachmentSize.textContent = `${formatBytes(file.size)} · 将随下一条消息发送`;
+  elements.attachmentPreview.classList.remove("hidden");
+  updateSendState();
+}
+
+function clearAttachment() {
+  state.attachment = null;
+  elements.fileInput.value = "";
+  elements.attachmentPreview.classList.add("hidden");
+  updateSendState();
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error);
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1]);
+    reader.readAsDataURL(file);
+  });
+}
+
+function updateSendState() {
+  elements.sendButton.disabled = state.running || (!elements.messageInput.value.trim() && !state.attachment);
+}
+
+function resizeComposer() {
+  elements.messageInput.style.height = "auto";
+  elements.messageInput.style.height = `${Math.min(elements.messageInput.scrollHeight, 150)}px`;
+}
+
+function normalizedTasks(session) {
+  return Object.values(session.state?.tasks || {}).sort((a, b) => Number(a.id) - Number(b.id));
+}
+
+function renderTasks() {
+  const total = state.tasks.length;
+  const completed = state.tasks.filter((task) => task.status === "completed").length;
+  const active = state.tasks.filter((task) => task.status === "in_progress").length;
+  const pending = state.tasks.filter((task) => task.status === "pending").length;
+  const percent = total ? Math.round((completed / total) * 100) : 0;
+  elements.tasksButton.classList.toggle("hidden", total === 0);
+  elements.tasksButtonLabel.textContent = active ? `${active} 个任务执行中` : `${completed}/${total} 个任务`;
+  elements.progressValue.textContent = `${percent}%`;
+  elements.taskProgress.querySelector(".progress-ring").style.setProperty("--progress", `${percent * 3.6}deg`);
+  elements.progressTitle.textContent = total ? (completed === total ? "全部任务已完成" : active ? "正在执行" : "等待继续") : "尚无任务";
+  elements.progressMeta.textContent = total ? `${completed} 已完成 · ${active} 进行中 · ${pending} 待处理` : "复杂工作会在这里显示实时状态";
+  elements.taskList.innerHTML = total ? state.tasks.map((task) => {
+    const icon = task.status === "completed" ? "✓" : task.status === "pending" ? "·" : "";
+    const detail = task.status === "completed" ? "已完成" : task.status === "in_progress" ? (task.activeForm || "正在执行") : task.metadata?.error ? "等待重试" : "等待执行";
+    return `<div class="task-item"><span class="task-state ${escapeHtml(task.status)}">${icon}</span><div><strong>${escapeHtml(task.subject)}</strong><span>${escapeHtml(detail)}</span></div></div>`;
+  }).join("") : `<div class="task-empty">发送一个复杂任务后，执行计划会出现在这里。</div>`;
+  renderInlineProgress(percent, completed, total, active);
+}
+
+function renderInlineProgress(percent, completed, total, active) {
+  if (!state.activeAssistantContent || !total) return;
+  if (!state.activeProgress) {
+    state.activeProgress = document.createElement("div");
+    state.activeProgress.className = "inline-progress";
+    state.activeAssistantContent.body.append(state.activeProgress);
+  }
+  const title = completed === total ? "任务已全部完成" : active ? `正在执行 ${active} 个任务` : "正在规划任务";
+  state.activeProgress.innerHTML = `<div class="inline-progress-head">${completed === total ? "" : '<i class="mini-spinner"></i>'}<strong>${title}</strong><span>${completed}/${total}</span></div><div class="inline-track"><span style="width:${percent}%"></span></div>`;
+  scrollToLatest();
+}
+
+function setTaskDrawer(open) {
+  state.taskDrawerOpen = open;
+  document.querySelector(".conversation-layout").classList.toggle("tasks-open", open);
+  elements.taskDrawer.setAttribute("aria-hidden", String(!open));
+}
+
+async function saveConversationTitle(title) {
+  await request(sessionUrl(state.sessionId), {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ stateDelta: { conversation_title: title.replace(/\s+/g, " ").slice(0, 60) } }),
+  });
+}
+
+async function refreshSession() {
+  if (!state.sessionId) return null;
+  const session = await request(sessionUrl(state.sessionId));
+  state.tasks = normalizedTasks(session);
+  renderTasks();
+  if (state.tasks.length && !state.openedTasksForRun && window.innerWidth > 980) {
+    state.openedTasksForRun = true;
+    setTaskDrawer(true);
+  }
+  return session;
+}
+
+function eventText(event) {
+  if (event.author !== "root_agent" || !event.content?.parts) return "";
+  return event.content.parts.filter((part) => part.text && !part.thought).map((part) => part.text).join("");
+}
+
+async function streamRun(parts) {
+  const response = await fetch("/run_sse", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      appName: APP_NAME,
+      userId: state.userId,
+      sessionId: state.sessionId,
+      streaming: true,
+      newMessage: { role: "user", parts },
+    }),
+  });
+  if (!response.ok) throw new Error((await response.text()) || `请求失败 (${response.status})`);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let lastRefresh = 0;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const records = buffer.split("\n\n");
+    buffer = records.pop() || "";
+    for (const record of records) {
+      const line = record.split("\n").find((item) => item.startsWith("data:"));
+      if (!line) continue;
+      const event = JSON.parse(line.slice(5).trim());
+      if (event.error) throw new Error(event.error);
+      updateAssistantEvent(state.activeAssistantContent, event);
+    }
+    if (Date.now() - lastRefresh > 500) {
+      await refreshSession();
+      lastRefresh = Date.now();
+    }
+  }
+}
+
+async function sendMessage() {
+  const typedText = elements.messageInput.value.trim();
+  const attachment = state.attachment;
+  if (state.running || (!typedText && !attachment)) return;
+  const messageText = typedText || "请阅读这份文件，并告诉我你能提供哪些帮助。";
+  state.running = true;
+  state.openedTasksForRun = false;
+  state.activeProgress = null;
+  updateSendState();
+  addUserMessage(messageText, attachment);
+  elements.messageInput.value = "";
+  resizeComposer();
+  state.activeAssistantContent = addAssistantMessage({ thinking: true });
+
+  try {
+    if (!state.sessionId) {
+      const session = await createSession();
+      state.sessionId = session.id;
+      history.replaceState(null, "", `/?session=${encodeURIComponent(session.id)}`);
+      await saveConversationTitle(messageText);
+    }
+    const parts = [{ text: messageText }];
+    if (attachment) {
+      const data = await fileToBase64(attachment);
+      parts.push({ inlineData: { mimeType: fileBadge(attachment.name) === "PDF" ? "application/pdf" : "text/markdown", displayName: attachment.name, data } });
+    }
+    clearAttachment();
+    await streamRun(parts);
+    await refreshSession();
+    if (!state.activeAssistantContent.text) appendAssistantText(state.activeAssistantContent, "任务已执行完成，但没有生成可显示的文本回复。");
+    await loadHistory();
+  } catch (error) {
+    appendAssistantText(state.activeAssistantContent, `抱歉，本次请求没有完成。\n\n${error.message}`);
+    showToast(`请求失败：${error.message}`);
+  } finally {
+    state.running = false;
+    state.activeAssistantContent = null;
+    state.activeProgress = null;
+    updateSendState();
+    elements.messageInput.focus();
+  }
+}
+
+function cleanUserText(event) {
+  if (event.author !== "user" || !event.content?.parts) return "";
+  return event.content.parts.map((part) => part.text || "").filter((text) => text && !text.startsWith("[Uploaded annual report artifact:")) .join("\n").trim();
+}
+
+function renderSession(session) {
+  elements.messages.innerHTML = "";
+  state.tasks = normalizedTasks(session);
+  let assistantBuffer = "";
+  const flushAssistant = () => {
+    if (assistantBuffer.trim()) addHistoricalAssistant(assistantBuffer);
+    assistantBuffer = "";
+  };
+  for (const event of session.events || []) {
+    if (event.partial) continue;
+    const userText = cleanUserText(event);
+    if (userText) {
+      flushAssistant();
+      addUserMessage(userText);
+      continue;
+    }
+    const text = eventText(event);
+    if (text) assistantBuffer += text;
+  }
+  flushAssistant();
+  if (elements.messages.children.length) ensureConversationVisible();
+  else {
+    elements.messages.classList.add("hidden");
+    elements.welcome.classList.remove("hidden");
+  }
+  renderTasks();
+  scrollToLatest();
+}
+
+function sessionTitle(session) {
+  if (session.state?.conversation_title) return session.state.conversation_title;
+  for (const event of session.events || []) {
+    const text = cleanUserText(event);
+    if (text) return text.replace(/\s+/g, " ").slice(0, 34);
+  }
+  return session.state?.report?.report_ref || "新对话";
+}
+
+async function loadHistory() {
+  try {
+    const sessions = await request(`/apps/${APP_NAME}/users/${encodeURIComponent(state.userId)}/sessions`);
+    sessions.sort((a, b) => (b.lastUpdateTime || 0) - (a.lastUpdateTime || 0));
+    elements.historyList.innerHTML = sessions.length ? sessions.slice(0, 20).map((session) => {
+      const taskCount = normalizedTasks(session).length;
+      return `<button class="history-item ${session.id === state.sessionId ? "active" : ""}" type="button" data-session="${escapeHtml(session.id)}"><strong>${escapeHtml(sessionTitle(session))}</strong><span>${taskCount ? `${taskCount} 个任务` : "普通对话"}</span></button>`;
+    }).join("") : `<div class="history-empty">还没有对话记录</div>`;
+  } catch (_) {
+    elements.historyList.innerHTML = `<div class="history-empty">暂时无法载入历史对话</div>`;
+  }
+}
+
+async function openSession(sessionId) {
+  if (state.running) return showToast("当前回复完成后再切换对话");
+  try {
+    const session = await request(sessionUrl(sessionId));
+    state.sessionId = session.id;
+    history.replaceState(null, "", `/?session=${encodeURIComponent(session.id)}`);
+    renderSession(session);
+    await loadHistory();
+    elements.sidebar.classList.remove("open");
+  } catch (error) {
+    showToast(`无法打开对话：${error.message}`);
+  }
+}
+
+function newChat() {
+  if (state.running) return showToast("当前回复完成后再新建对话");
+  state.sessionId = null;
+  state.tasks = [];
+  state.attachment = null;
+  state.taskDrawerOpen = false;
+  elements.messages.innerHTML = "";
+  elements.messages.classList.add("hidden");
+  elements.welcome.classList.remove("hidden");
+  elements.messageInput.value = "";
+  elements.fileInput.value = "";
+  elements.attachmentPreview.classList.add("hidden");
+  setTaskDrawer(false);
+  renderTasks();
+  history.replaceState(null, "", "/");
+  loadHistory();
+  elements.messageInput.focus();
+}
+
+function bindEvents() {
+  elements.messageInput.addEventListener("input", () => { resizeComposer(); updateSendState(); });
+  elements.messageInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendMessage(); }
+  });
+  elements.sendButton.addEventListener("click", sendMessage);
+  elements.attachButton.addEventListener("click", () => elements.fileInput.click());
+  elements.fileInput.addEventListener("change", () => setAttachment(elements.fileInput.files[0]));
+  elements.removeAttachmentButton.addEventListener("click", clearAttachment);
+  elements.newChatButton.addEventListener("click", newChat);
+  elements.menuButton.addEventListener("click", () => elements.sidebar.classList.toggle("open"));
+  elements.tasksButton.addEventListener("click", () => setTaskDrawer(!state.taskDrawerOpen));
+  elements.closeTasksButton.addEventListener("click", () => setTaskDrawer(false));
+  elements.suggestions.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-prompt]");
+    if (!button) return;
+    elements.messageInput.value = button.dataset.prompt;
+    resizeComposer();
+    updateSendState();
+    elements.messageInput.focus();
+  });
+  elements.historyList.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-session]");
+    if (button) openSession(button.dataset.session);
+  });
+}
+
+async function initialize() {
+  bindEvents();
+  renderTasks();
+  await loadHistory();
+  const sessionId = new URLSearchParams(location.search).get("session");
+  if (sessionId) await openSession(sessionId);
+  elements.messageInput.focus();
+}
+
+initialize();
