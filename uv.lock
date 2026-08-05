@@ -463,6 +463,7 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pydantic" },
     { name = "pymupdf" },
+    { name = "python-dotenv" },
 ]
 
 [package.dev-dependencies]
@@ -480,6 +481,7 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=25.0.0" },
     { name = "pydantic", specifier = ">=2.11,<3" },
     { name = "pymupdf", specifier = ">=1.26,<2" },
+    { name = "python-dotenv", specifier = ">=1.2,<2" },
 ]
 
 [package.metadata.requires-dev]

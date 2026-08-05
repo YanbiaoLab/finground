@@ -1,7 +1,10 @@
+import os
+from pathlib import Path
+
 import pytest
 
 from finground.agent import app, root_agent
-from finground.config import ModelConfig
+from finground.config import ModelConfig, load_project_env
 from finground.kpi_dispatcher import (
     DISPATCH_ITEM_NAME,
     DISPATCHER_NAME,
@@ -80,3 +83,25 @@ def test_model_config_rejects_missing_required_values(monkeypatch: pytest.Monkey
 
     with pytest.raises(RuntimeError, match="FINGROUND_MODEL_API_KEY"):
         ModelConfig.from_env()
+
+
+def test_model_config_rejects_example_service_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FINGROUND_MODEL_BASE_URL", "https://llm.example.com/v1")
+    monkeypatch.setenv("FINGROUND_MODEL_API_KEY", "secret")
+
+    with pytest.raises(RuntimeError, match="example placeholder"):
+        ModelConfig.from_env()
+
+
+def test_project_dotenv_loads_without_overriding_process_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("FROM_DOTENV=file-value\nPROCESS_WINS=file-value\n")
+    monkeypatch.delenv("FROM_DOTENV", raising=False)
+    monkeypatch.setenv("PROCESS_WINS", "process-value")
+
+    assert load_project_env(env_file) is True
+    assert os.environ["FROM_DOTENV"] == "file-value"
+    assert os.environ["PROCESS_WINS"] == "process-value"

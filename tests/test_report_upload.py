@@ -1,6 +1,8 @@
 import asyncio
 from collections.abc import AsyncGenerator
+from types import SimpleNamespace
 
+import pytest
 from google.adk.agents import Agent
 from google.adk.apps import App
 from google.adk.artifacts import InMemoryArtifactService
@@ -11,6 +13,7 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
+from finground.ocr_client import OcrError, PdfExtractionError
 from finground.report_plugin import ReportUploadPlugin
 
 
@@ -27,6 +30,12 @@ class StubOcrClient:
         self.calls += 1
         return "# Page one\n\nRevenue 123\n\n<--- Page Split --->\n\n# Page two", 2
 
+
+class FailingOcrClient(StubOcrClient):
+    async def pdf_to_markdown(self, pdf_data: bytes) -> tuple[str, int]:
+        del pdf_data
+        self.calls += 1
+        raise OcrError("service unavailable")
 
 class FinalResponseLlm(BaseLlm):
     async def generate_content_async(
@@ -165,6 +174,7 @@ def test_pdf_attachment_is_ocrd_into_markdown_artifact() -> None:
         "artifact_name": "AAP_2017.ocr.md",
         "mime_type": "text/markdown",
         "source_mime_type": "application/pdf",
+        "extraction_method": "ocr",
         "total_pages": 2,
         "total_chars": 57,
     }
@@ -173,6 +183,39 @@ def test_pdf_attachment_is_ocrd_into_markdown_artifact() -> None:
     user_event = next(event for event in events if event.author == "user")
     assert all(part.inline_data is None for part in user_event.content.parts)
     assert 'report_ref "AAP_2017_ocr"' in user_event.content.parts[1].text
+
+
+def test_pdf_without_configured_ocr_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("FINGROUND_OCR_BASE_URL")
+    monkeypatch.delenv("FINGROUND_OCR_MODEL")
+    plugin = ReportUploadPlugin()
+    context = SimpleNamespace(
+        artifact_service=InMemoryArtifactService(),
+        app_name="pdf_without_ocr_test",
+        user_id="user",
+        session=SimpleNamespace(id="session"),
+    )
+
+    with pytest.raises(PdfExtractionError, match="PDF OCR is not configured"):
+        asyncio.run(plugin._pdf_to_markdown(context, b"fake pdf"))
+
+
+def test_pdf_ocr_failure_is_propagated() -> None:
+    client = FailingOcrClient()
+    plugin = ReportUploadPlugin(ocr_client=client)
+    context = SimpleNamespace(
+        artifact_service=InMemoryArtifactService(),
+        app_name="pdf_ocr_failure_test",
+        user_id="user",
+        session=SimpleNamespace(id="session"),
+    )
+
+    with pytest.raises(OcrError, match="service unavailable"):
+        asyncio.run(plugin._pdf_to_markdown(context, b"fake pdf"))
+
+    assert client.calls == 1
 
 
 def test_pdf_ocr_cache_is_reused_across_sessions_but_not_users() -> None:

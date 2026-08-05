@@ -1,9 +1,9 @@
 const APP_NAME = "finground";
-const USER_STORAGE_KEY = "finground-user-id";
+const USER_ID = "user";
 const MAX_FILE_BYTES = 100 * 1024 * 1024;
 
 const state = {
-  userId: getOrCreateUserId(),
+  userId: USER_ID,
   sessionId: null,
   attachment: null,
   tasks: [],
@@ -22,15 +22,6 @@ const ids = [
   "taskList", "conversation", "toast",
 ];
 const elements = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
-
-function getOrCreateUserId() {
-  let value = localStorage.getItem(USER_STORAGE_KEY);
-  if (!value) {
-    value = `local-${crypto.randomUUID()}`;
-    localStorage.setItem(USER_STORAGE_KEY, value);
-  }
-  return value;
-}
 
 function escapeHtml(value = "") {
   const node = document.createElement("div");

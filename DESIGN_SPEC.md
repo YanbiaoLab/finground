@@ -52,7 +52,8 @@ tool call、trace 或 performance warning 等开发调试信息。KPI 提取是�
 
 - 不为每个 KPI 创建独立 Agent、prompt 文件或 Python 模块。
 - 不实现通用工作流引擎、消息队列或持久化任务平台。
-- 不实现网页下载。PDF 上传通过外部 Unlimited-OCR 服务转为 Markdown，OCR 服务本身不在本项目中实现。
+- 不实现网页下载。PDF 上传只通过已配置的外部 OCR 服务转为 Markdown；OCR 服务本身不在
+  本项目中实现，不读取 PDF 自带文本层，也不实现本地图片 OCR。
 - 不使用 RAG、向量数据库或 embeddings。
 - 不接入 SEC Facts、XBRL、第三方财务 API 或外部搜索。
 - 不实现自建并发调度器、消息队列、benchmark CLI 或评分框架；并发只使用 ADK Workflow
@@ -76,8 +77,8 @@ tool call、trace 或 performance warning 等开发调试信息。KPI 提取是�
 - `target_year`：需要提取的财年。
 - `kpis`：规范化 KPI key 列表。
 
-ADK Web 用户可以直接把 UTF-8 Markdown 或 PDF 年报附加到消息。PDF 会在插件侧逐页渲染、默认
-每 20 页一批通过 OpenAI 兼容的 Unlimited-OCR 服务转成 Markdown。渲染与远端 OCR 按批次流水线执行，
+ADK Web 用户可以直接把 UTF-8 Markdown 或 PDF 年报附加到消息。配置 OCR 时，PDF 会在插件侧逐页
+渲染、默认每 20 页一批通过 OpenAI-compatible OCR 服务转成 Markdown。渲染与远端 OCR 按批次流水线执行，
 默认最多并行 8 个请求；多页使用 `base` 模式，拆分到单页时使用 `gundam` 模式。批次输出无法可靠按页
 映射时递归二分，只在最后必要时退化到单页；批次响应截断时保留已完整返回的页面，只重试未完成尾部。
 单页响应达到 8,192 token 输出上限时，只对该页使用 24,576 token 预算重试一次；重试仍截断则拒绝
@@ -87,13 +88,17 @@ ADK Web 用户可以直接把 UTF-8 Markdown 或 PDF 年报附加到消息。PDF
 故障引发指数级请求。OCR HTTP 客户端默认不继承系统代理；只有明确设置
 `FINGROUND_OCR_TRUST_ENV=true` 时才读取代理环境变量。
 
-成功的 PDF OCR Markdown 以 PDF SHA-256 和输出相关 OCR 配置的指纹作为缓存键，保存为当前用户范围的
-ADK artifact。同一用户跨 session 上传内容相同的 PDF 时直接复用缓存，不跨用户共享；文件名变化不影响
-命中。模型、服务地址、渲染 DPI、批大小、页数限制或 `FINGROUND_OCR_CACHE_VERSION` 变化时缓存自动
-失效。失败、空内容和截断结果不能写入缓存；缓存读取或写入失败必须降级为正常 OCR，不能阻断上传。
+未同时配置 `FINGROUND_OCR_BASE_URL` 和 `FINGROUND_OCR_MODEL` 时，PDF 上传立即返回明确的配置错误。
+OCR 已配置但最终请求失败时保留原始 OCR 错误，不读取 PDF 自带文本层。OCR 输出使用
+`<--- Page Split --->` 页边界，manifest 通过 `extraction_method` 记录 `ocr`。
+
+成功的 OCR 结果以 PDF SHA-256 和 OCR 实现/配置指纹作为缓存键，保存为当前用户范围的 ADK artifact。
+同一用户跨 session 上传内容相同的 PDF 时直接复用缓存，不跨用户共享；文件名变化不影响命中。OCR
+模型、服务地址、渲染 DPI、批大小、页数限制或缓存版本变化时缓存自动失效。失败、空内容或截断结果
+不能写入缓存；缓存读写失败不能阻断正常 OCR。
 
 `ReportUploadPlugin` 在 Root 调用模型前将
-Markdown/OCR 结果保存为 ADK artifact、从文件名生成稳定 `report_ref`、写入 session manifest，并用一条
+Markdown/PDF 提取结果保存为 ADK artifact、从文件名生成稳定 `report_ref`、写入 session manifest，并用一条
 只包含 artifact 名称和 report_ref 的短占位文本替换原始附件。完整正文不会进入模型上下文。
 程序化调用也可以预先保存 Markdown 或分块 JSONL artifact 并设置相同 manifest：
 
@@ -103,6 +108,8 @@ Markdown/OCR 结果保存为 ADK artifact、从文件名生成稳定 `report_ref
     "report_ref": "ACME_2025",
     "artifact_name": "ACME_2025.md",
     "mime_type": "text/markdown",
+    "source_mime_type": "application/pdf",
+    "extraction_method": "ocr",
     "sha256": "...",
     "total_pages": 214,
     "total_chunks": 487,
@@ -153,6 +160,7 @@ TaskProgressPlugin
 ReportUploadPlugin
   ├── saves Markdown chat attachments as session artifacts
   ├── reuses successful PDF OCR from user-scoped content-addressed artifacts
+  ├── rejects PDF uploads when OCR is absent or fails
   ├── replaces full attachment content with a short report reference
   └── initializes the current report manifest
 
@@ -511,11 +519,15 @@ ADK 标准环境配置，不由业务代码管理。
 
 - `FINGROUND_MODEL`、`FINGROUND_MODEL_BASE_URL`、`FINGROUND_MODEL_API_KEY`：Root、Worker 和
   上下文摘要共用的 OpenAI-compatible 模型配置，三项均为必需；
-- `FINGROUND_OCR_BASE_URL`、`FINGROUND_OCR_MODEL`：PDF OCR 地址与模型，均为必需；
+- `FINGROUND_OCR_BASE_URL`、`FINGROUND_OCR_MODEL`：PDF OCR 地址与模型；上传 PDF 时两者必须配置；
 - `FINGROUND_OCR_API_KEY`：OCR 鉴权密钥，可为空以支持无鉴权的本地服务；
 - 其余 OCR 超时、并发、批大小、渲染和缓存参数继续使用 `FINGROUND_OCR_*` 环境变量。
 
 仓库只提交 `.env.example` 的非敏感占位配置；`.env` 和所有实际密钥由 `.gitignore` 排除。
+配置模块启动时使用 `python-dotenv` 显式加载项目根目录 `.env`，且不覆盖进程中已经存在的变量，
+因此 shell、容器或部署平台注入的环境变量优先于本地文件。
+模型和 OCR 服务地址必须是绝对 HTTP(S) URL；`example.com` 占位地址会在启动阶段被拒绝，不能等到
+第一次模型调用才表现为网络连接错误。`.env.example` 对必需模型配置保留空值，要求部署者显式填写。
 
 ## 8. End-to-End Workflow
 
@@ -573,7 +585,7 @@ ADK 标准环境配置，不由业务代码管理。
   sibling outcomes。
 - ADK Web 消息中的 Markdown 附件会自动保存为 artifact、初始化 report manifest，并从模型输入
   中移除完整正文。
-- 同一用户跨 session 重复上传相同 PDF 时只执行一次 OCR；不同用户不能共享该缓存。
+- 同一用户跨 session 重复上传相同 PDF 时复用 OCR 缓存；不同用户不能共享缓存。
 - Worker 尝试在读取 KPI knowledge 前搜索年报时会被工具拒绝。
 - Worker 不能读取未经过搜索返回的 chunk。
 - 对大于模型上下文窗口的年报，搜索工具仍能扫描全部 chunks，而单次模型可见的 report tool
@@ -614,9 +626,11 @@ ADK 标准环境配置，不由业务代码管理。
   错误记入 metadata 并返回 pending，不回滚成功 sibling。
 - Root 生成空白、截断或其他非法 tool-call JSON：ADK node 最多尝试 3 次；不得立即终止 SSE。
 - 部分 KPI 成功、部分未完成：Root 返回部分结果和明确的失败清单。
-- PDF OCR 缓存损坏、不可读或写入失败：忽略缓存并完成正常 OCR 流程；不得缓存失败或截断输出。
+- PDF 提取缓存损坏、不可读或写入失败：忽略缓存并完成正常提取流程；不得缓存失败、截断或覆盖不足的输出。
 - 多页 OCR 超时：自动缩小批次继续执行；单页连续两次超时后返回包含异常类型、超时值和页码的错误。
 - OCR 连接中断：原请求有限重试，多页最多额外二分一次；永久 HTTP 错误和非法响应不得盲目重试。
+- OCR 未配置：PDF 上传返回明确的配置错误，不保存 artifact 或缓存。
+- OCR 最终失败：返回原始 OCR 错误，不读取 PDF 自带文本层，不保存失败结果。
 
 ## 12. Minimal Project Layout
 
@@ -653,7 +667,7 @@ tests/
 
 以下事项必须在原型通过评估后单独决策，不在本次实现中默认加入：
 
-- 年报 PDF/HTML 的加载和分页方式；
+- 年报 HTML 的加载和分页方式；
 - Task Store 是否需要跨 session 持久化；
 - 是否增加结构化 SEC/XBRL 数据作为辅助来源；
 - 部署到 Agent Engine、Cloud Run 或其他环境；

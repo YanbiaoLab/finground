@@ -4,8 +4,21 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
+from urllib.parse import urlparse
 
+from dotenv import load_dotenv
 from google.adk.models.lite_llm import LiteLlm
+
+PROJECT_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+
+
+def load_project_env(env_file: Path = PROJECT_ENV_FILE) -> bool:
+    """Load project-local variables without overriding the process environment."""
+    return load_dotenv(dotenv_path=env_file, override=False)
+
+
+load_project_env()
 
 
 def required_env(name: str) -> str:
@@ -13,6 +26,20 @@ def required_env(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
         raise RuntimeError(f"required environment variable {name} is not set")
+    return value
+
+
+def required_service_url(name: str) -> str:
+    """Return a real HTTP(S) service URL rather than an example placeholder."""
+    value = required_env(name).rstrip("/")
+    parsed = urlparse(value)
+    hostname = (parsed.hostname or "").casefold()
+    if parsed.scheme not in {"http", "https"} or not hostname:
+        raise RuntimeError(f"environment variable {name} must be an absolute HTTP(S) URL")
+    if hostname == "example.com" or hostname.endswith(".example.com"):
+        raise RuntimeError(
+            f"environment variable {name} still contains the example placeholder {hostname}"
+        )
     return value
 
 
@@ -28,7 +55,7 @@ class ModelConfig:
     def from_env(cls) -> ModelConfig:
         return cls(
             name=required_env("FINGROUND_MODEL"),
-            base_url=required_env("FINGROUND_MODEL_BASE_URL").rstrip("/"),
+            base_url=required_service_url("FINGROUND_MODEL_BASE_URL"),
             api_key=required_env("FINGROUND_MODEL_API_KEY"),
         )
 

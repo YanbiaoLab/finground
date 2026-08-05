@@ -7,7 +7,7 @@ import hashlib
 import logging
 import re
 from pathlib import PurePath
-from typing import Any
+from typing import Any, Protocol
 
 from google.adk.agents.base_agent import BaseAgent
 from google.adk.agents.callback_context import CallbackContext
@@ -15,7 +15,11 @@ from google.adk.agents.invocation_context import InvocationContext
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
-from finground.ocr_client import VllmPdfOcrClient
+from finground.ocr_client import (
+    OcrConfig,
+    PdfExtractionError,
+    VllmPdfOcrClient,
+)
 from finground.report_tools import REPORT_STATE_KEY
 
 _PENDING_ARTIFACTS_KEY = "temp:report_upload_artifacts"
@@ -24,6 +28,14 @@ _PAGE_BREAK = re.compile(r"<---\s*Page Split\s*--->", re.IGNORECASE)
 _OCR_CACHE_ROOT = "user:.finground/ocr"
 
 logger = logging.getLogger(__name__)
+
+
+class PdfOcrClient(Protocol):
+    """The OCR behavior required by the report upload plugin."""
+
+    def cache_fingerprint(self) -> str: ...
+
+    async def pdf_to_markdown(self, pdf_data: bytes) -> tuple[str, int]: ...
 
 
 def _is_markdown(blob: types.Blob) -> bool:
@@ -73,9 +85,53 @@ def _cached_markdown(artifact: types.Part | None) -> str | None:
 class ReportUploadPlugin(BasePlugin):
     """Save uploaded Markdown reports and make the latest one current."""
 
-    def __init__(self, ocr_client: VllmPdfOcrClient | None = None) -> None:
+    def __init__(self, ocr_client: PdfOcrClient | None = None) -> None:
         super().__init__(name="report_upload")
-        self._ocr_client = ocr_client or VllmPdfOcrClient()
+        if ocr_client is not None:
+            self._ocr_client = ocr_client
+        else:
+            config = OcrConfig.from_env_if_configured()
+            self._ocr_client = VllmPdfOcrClient(config) if config is not None else None
+
+    async def _load_pdf_cache(
+        self,
+        invocation_context: InvocationContext,
+        filename: str,
+    ) -> str | None:
+        try:
+            artifact = await invocation_context.artifact_service.load_artifact(
+                app_name=invocation_context.app_name,
+                user_id=invocation_context.user_id,
+                session_id=invocation_context.session.id,
+                filename=filename,
+            )
+        except Exception:  # noqa: BLE001 - cache failure must not block OCR
+            logger.warning("Unable to read PDF OCR cache", exc_info=True)
+            return None
+        return _cached_markdown(artifact)
+
+    async def _save_pdf_cache(
+        self,
+        invocation_context: InvocationContext,
+        filename: str,
+        text: str,
+    ) -> None:
+        artifact = types.Part(
+            inline_data=types.Blob(
+                data=text.encode("utf-8"),
+                mime_type="text/markdown",
+            )
+        )
+        try:
+            await invocation_context.artifact_service.save_artifact(
+                app_name=invocation_context.app_name,
+                user_id=invocation_context.user_id,
+                session_id=invocation_context.session.id,
+                filename=filename,
+                artifact=artifact,
+            )
+        except Exception:  # noqa: BLE001 - cache failure must not discard OCR output
+            logger.warning("Unable to write PDF OCR cache", exc_info=True)
 
     async def _pdf_to_markdown(
         self,
@@ -85,41 +141,27 @@ class ReportUploadPlugin(BasePlugin):
         artifact_service = invocation_context.artifact_service
         if artifact_service is None:
             raise RuntimeError("an artifact service is required for report uploads")
-        cache_filename = _ocr_cache_filename(
+        if self._ocr_client is None:
+            raise PdfExtractionError(
+                "PDF OCR is not configured; set FINGROUND_OCR_BASE_URL and "
+                "FINGROUND_OCR_MODEL"
+            )
+        ocr_cache_filename = _ocr_cache_filename(
             pdf_data,
             self._ocr_client.cache_fingerprint(),
         )
-        try:
-            cached_artifact = await artifact_service.load_artifact(
-                app_name=invocation_context.app_name,
-                user_id=invocation_context.user_id,
-                session_id=invocation_context.session.id,
-                filename=cache_filename,
-            )
-        except Exception:  # noqa: BLE001 - cache failure must not block OCR
-            logger.warning("Unable to read PDF OCR cache", exc_info=True)
-            cached_artifact = None
-        cached_text = _cached_markdown(cached_artifact)
+        cached_text = await self._load_pdf_cache(
+            invocation_context,
+            ocr_cache_filename,
+        )
         if cached_text is not None:
             return cached_text, len(_PAGE_BREAK.split(cached_text))
-
         text, total_pages = await self._ocr_client.pdf_to_markdown(pdf_data)
-        cache_artifact = types.Part(
-            inline_data=types.Blob(
-                data=text.encode("utf-8"),
-                mime_type="text/markdown",
-            )
+        await self._save_pdf_cache(
+            invocation_context,
+            ocr_cache_filename,
+            text,
         )
-        try:
-            await artifact_service.save_artifact(
-                app_name=invocation_context.app_name,
-                user_id=invocation_context.user_id,
-                session_id=invocation_context.session.id,
-                filename=cache_filename,
-                artifact=cache_artifact,
-            )
-        except Exception:  # noqa: BLE001 - cache failure must not discard OCR output
-            logger.warning("Unable to write PDF OCR cache", exc_info=True)
         return text, total_pages
 
     async def on_user_message_callback(
@@ -188,6 +230,7 @@ class ReportUploadPlugin(BasePlugin):
             }
             if _is_pdf(blob):
                 latest_manifest["source_mime_type"] = "application/pdf"
+                latest_manifest["extraction_method"] = "ocr"
             new_parts.append(
                 types.Part.from_text(
                     text=(

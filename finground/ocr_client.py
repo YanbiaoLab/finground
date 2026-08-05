@@ -1,4 +1,4 @@
-"""PDF rendering and OCR through an OpenAI-compatible vLLM endpoint."""
+"""Render PDFs and extract their content through a vLLM OCR endpoint."""
 
 from __future__ import annotations
 
@@ -12,16 +12,21 @@ from dataclasses import dataclass, field
 import fitz
 import httpx
 
-from finground.config import required_env
+from finground.config import required_env, required_service_url
 
 # Unlimited-OCR's chat template requires this task token; free-form transcription
 # prompts can produce an immediate empty response.
 DEFAULT_OCR_PROMPT = "<image>document parsing."
 MULTI_PAGE_OCR_PROMPT = "<image>Multi page parsing."
 OCR_PAGE_SEPARATOR = "<PAGE>"
+MARKDOWN_PAGE_SEPARATOR = "\n\n<--- Page Split --->\n\n"
 
 
-class OcrError(RuntimeError):
+class PdfExtractionError(RuntimeError):
+    """Raised when PDF extraction cannot produce usable text."""
+
+
+class OcrError(PdfExtractionError):
     """Raised when a PDF cannot be rendered or OCR fails."""
 
 
@@ -65,7 +70,7 @@ class OcrConfig:
     @classmethod
     def from_env(cls) -> OcrConfig:
         return cls(
-            base_url=required_env("FINGROUND_OCR_BASE_URL").rstrip("/"),
+            base_url=required_service_url("FINGROUND_OCR_BASE_URL"),
             model=required_env("FINGROUND_OCR_MODEL"),
             api_key=os.getenv("FINGROUND_OCR_API_KEY", ""),
             timeout_seconds=float(os.getenv("FINGROUND_OCR_TIMEOUT_SECONDS", "180")),
@@ -77,6 +82,14 @@ class OcrConfig:
             trust_env=os.getenv("FINGROUND_OCR_TRUST_ENV", "false").casefold()
             in {"1", "true", "yes", "on"},
         )
+
+    @classmethod
+    def from_env_if_configured(cls) -> OcrConfig | None:
+        base_url = os.getenv("FINGROUND_OCR_BASE_URL", "").strip()
+        model = os.getenv("FINGROUND_OCR_MODEL", "").strip()
+        if not base_url and not model:
+            return None
+        return cls.from_env()
 
 
 class VllmPdfOcrClient:
@@ -161,7 +174,7 @@ class VllmPdfOcrClient:
         finally:
             document.close()
         pages = [page for batch in batches for page in batch]
-        return "\n\n<--- Page Split --->\n\n".join(pages), page_count
+        return MARKDOWN_PAGE_SEPARATOR.join(pages), page_count
 
     @staticmethod
     def _render_pages(

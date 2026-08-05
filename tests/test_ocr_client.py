@@ -5,7 +5,23 @@ import fitz
 import httpx
 import pytest
 
-from finground.ocr_client import OcrConfig, OcrError, VllmPdfOcrClient
+from finground.ocr_client import (
+    OcrConfig,
+    OcrError,
+    VllmPdfOcrClient,
+)
+
+
+def _pdf_with_text_pages(*page_texts: str) -> bytes:
+    document = fitz.open()
+    try:
+        for text in page_texts:
+            page = document.new_page()
+            if text:
+                page.insert_text((72, 72), text)
+        return document.tobytes()
+    finally:
+        document.close()
 
 
 def test_invalid_pdf_is_rejected_before_network_call() -> None:
