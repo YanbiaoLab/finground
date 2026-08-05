@@ -1,0 +1,84 @@
+{
+  "eval_set_id": "finground_core",
+  "name": "FinGround core task planning",
+  "description": "Checks that KPI work is planned, activated, and sent through the batch dispatcher.",
+  "eval_cases": [
+    {
+      "eval_id": "kpi_task_is_created",
+      "conversation": [
+        {
+          "invocation_id": "invocation-1",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "For report ACME_2025 and fiscal year 2025, extract revenue."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "I created the revenue extraction task."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "TaskCreate",
+                "args": {
+                  "subject": "Extract revenue",
+                  "description": "Extract revenue from ACME_2025 for fiscal year 2025.",
+                  "activeForm": "Extracting revenue",
+                  "metadata": {
+                    "task_input": {
+                      "report_ref": "ACME_2025",
+                      "target_year": 2025,
+                      "kpi_key": "revenue"
+                    }
+                  }
+                }
+              },
+              {
+                "name": "TaskUpdate",
+                "args": {
+                  "taskId": "1",
+                  "status": "in_progress",
+                  "owner": "kpi_worker",
+                  "metadata": {
+                    "task_input": {
+                      "task_id": "1",
+                      "report_ref": "ACME_2025",
+                      "target_year": 2025,
+                      "kpi_key": "revenue"
+                    }
+                  }
+                }
+              },
+              {
+                "name": "dispatch_kpi_tasks",
+                "args": {
+                  "tasks": [
+                    {
+                      "task_id": "1",
+                      "report_ref": "ACME_2025",
+                      "target_year": 2025,
+                      "kpi_key": "revenue"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "finground",
+        "user_id": "eval-user",
+        "state": {}
+      }
+    }
+  ]
+}

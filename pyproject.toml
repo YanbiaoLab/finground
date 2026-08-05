@@ -4,17 +4,17 @@ version = "0.1.0"
 description = "Agentic retrieval and structured extraction of financial documents"
 requires-python = ">=3.13"
 dependencies = [
-    "google-adk>=1.0,<2",
-    "litellm>=1.83.7,<=1.83.14",
-    "pyarrow>=25,<26",
+    "google-adk>=2.6.2",
+    "httpx>=0.28,<1",
+    "pandas>=3.0.5",
+    "pyarrow>=25.0.0",
+    "pymupdf>=1.26,<2",
     "pydantic>=2.11,<3",
 ]
 
-[project.scripts]
-finground = "finground.benchmark.cli:main"
-
 [dependency-groups]
 dev = [
+    "google-adk[eval]>=2.6.2",
     "pytest>=8.3,<9",
     "ruff>=0.11,<1",
 ]
@@ -34,7 +34,7 @@ line-length = 100
 target-version = "py313"
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F", "I", "UP", "B", "BLE", "C4", "SIM", "PERF", "RUF", "ASYNC"]
+select = ["E4", "E7", "E9", "F", "I", "N", "UP", "B", "BLE", "C4", "SIM", "PERF", "RUF", "ASYNC"]
 ignore = [
     "ASYNC240", # Small local filesystem writes are intentionally synchronous.
     "E501",     # Ruff formatter cannot wrap long financial catalogue strings.
