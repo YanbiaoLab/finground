@@ -106,6 +106,21 @@ class PartiallyFailingWorkerLlm(BaseLlm):
         )
 
 
+class EmptyWorkerResultLlm(BaseLlm):
+    async def generate_content_async(
+        self,
+        llm_request: LlmRequest,
+        stream: bool = False,
+    ) -> AsyncGenerator[LlmResponse]:
+        del llm_request, stream
+        yield LlmResponse(
+            content=types.Content(
+                role="model",
+                parts=[types.Part.from_text(text="I could not complete the task.")],
+            )
+        )
+
+
 class MalformedRootToolCallLlm(BaseLlm):
     attempts: ClassVar[int] = 0
 
@@ -514,6 +529,66 @@ def test_dispatcher_retries_and_isolates_one_worker_failure() -> None:
         "result": None,
         "error": "JSONDecodeError: Unterminated string: line 1 column 1 (char 0)",
     }
+
+
+def test_dispatcher_converts_missing_worker_result_to_failed_outcome() -> None:
+    async def run() -> list[dict]:
+        worker = create_kpi_worker()
+        worker.model = EmptyWorkerResultLlm(model="empty-worker-result")
+        root = create_root_agent(worker=worker)
+        root.model = ScriptedLlm(
+            model="root-script",
+            responses=[
+                _tool_call(
+                    DISPATCHER_NAME,
+                    {
+                        "tasks": [
+                            {
+                                "task_id": "1",
+                                "report_ref": "ACME_2025",
+                                "target_year": 2025,
+                                "kpi_key": "revenue",
+                            }
+                        ]
+                    },
+                ),
+                types.Content(role="model", parts=[types.Part.from_text(text="Handled.")]),
+            ],
+        )
+        app = App(name="missing_worker_result_test", root_agent=root)
+        sessions = InMemorySessionService()
+        await sessions.create_session(
+            app_name=app.name,
+            user_id="user",
+            session_id="session",
+        )
+        runner = Runner(app=app, session_service=sessions)
+        events = [
+            event
+            async for event in runner.run_async(
+                user_id="user",
+                session_id="session",
+                new_message=types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text="Extract revenue")],
+                ),
+            )
+        ]
+        return next(
+            event.output
+            for event in reversed(events)
+            if event.author == DISPATCHER_NAME and isinstance(event.output, list)
+        )
+
+    assert asyncio.run(run()) == [
+        {
+            "task_id": "1",
+            "kpi_key": "revenue",
+            "status": "failed",
+            "result": None,
+            "error": "WorkerResultError: kpi_worker returned no task result",
+        }
+    ]
 
 
 def test_root_retries_malformed_tool_call_json() -> None:

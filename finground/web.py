@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import quote
 
 import uvicorn
 from fastapi.staticfiles import StaticFiles
@@ -11,6 +12,7 @@ from google.adk.cli.fast_api import get_fast_api_app
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 WEB_ROOT = PROJECT_ROOT / "web"
+RAW_PDF_ROOT = WEB_ROOT / "raw-pdf"
 
 
 def create_web_app():
@@ -20,6 +22,18 @@ def create_web_app():
         web=False,
         use_local_storage=True,
     )
+
+    @app.get("/_finground/sample-reports")
+    async def sample_reports() -> list[dict[str, str | int]]:
+        return [
+            {
+                "name": path.name,
+                "size": path.stat().st_size,
+                "url": f"/raw-pdf/{quote(path.name, safe='')}",
+            }
+            for path in sorted(RAW_PDF_ROOT.glob("*.pdf"), key=lambda item: item.name.casefold())
+            if path.is_file()
+        ]
 
     app.mount("/", StaticFiles(directory=WEB_ROOT, html=True), name="finground-ui")
     return app

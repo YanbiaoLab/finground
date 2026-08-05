@@ -5,9 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="FinGround 对话式财务研究助手" />
     <title>FinGround · 财务研究助手</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -57,18 +54,28 @@
               <span class="eyebrow">FINANCIAL RESEARCH, GROUNDED</span>
               <h1>今天想研究什么？</h1>
               <p>我可以拆解复杂任务、读取年报并提取带证据的财务指标。直接描述目标，也可以附上 PDF 或 Markdown 文件。</p>
-              <div class="suggestions" id="suggestions">
-                <button type="button" data-prompt="请从我上传的年报中提取 FY2017 的 revenue、gross_profit、operating_income、net_income 和 operating_cash_flow，并附上原文证据。">
-                  <span class="suggestion-icon green"><svg viewBox="0 0 22 22"><path d="M5 17V9h3v8H5Zm5 0V5h3v12h-3Zm5 0v-6h3v6h-3Z" /></svg></span>
-                  <span><strong>提取多个 KPI</strong><small>从年报中查找并核对财务指标</small></span>
-                  <svg class="arrow" viewBox="0 0 20 20"><path d="M5 10h10m-4-4 4 4-4 4" /></svg>
-                </button>
-                <button type="button" data-prompt="请帮我规划这项财务研究工作，拆分任务并持续汇报进度：">
-                  <span class="suggestion-icon amber"><svg viewBox="0 0 22 22"><path d="M6 5h10M6 11h10M6 17h7M3 5h.1M3 11h.1M3 17h.1" /></svg></span>
-                  <span><strong>规划复杂研究</strong><small>把目标拆成可追踪、可重试的任务</small></span>
-                  <svg class="arrow" viewBox="0 0 20 20"><path d="M5 10h10m-4-4 4 4-4 4" /></svg>
-                </button>
-              </div>
+              <section class="sample-reports hidden" id="sampleReports" aria-labelledby="sampleReportsTitle">
+                <div class="sample-reports-heading">
+                  <div><span class="eyebrow">SAMPLE FILES</span><h2 id="sampleReportsTitle">选择示例文件</h2></div>
+                  <span>仅添加附件，不会自动发送</span>
+                </div>
+                <div class="sample-report-list" id="sampleReportList"></div>
+              </section>
+              <section class="sample-questions" aria-labelledby="sampleQuestionsTitle">
+                <div class="sample-questions-heading"><span class="eyebrow">SAMPLE QUESTIONS</span><h2 id="sampleQuestionsTitle">选择示例问题</h2></div>
+                <div class="suggestions" id="suggestions">
+                  <button type="button" data-prompt="请从这份年报中提取 FY2022 的 revenue、gross_profit、operating_income、net_income 和 operating_cash_flow，并附上原文证据。">
+                    <span class="suggestion-icon green"><svg viewBox="0 0 22 22"><path d="M5 17V9h3v8H5Zm5 0V5h3v12h-3Zm5 0v-6h3v6h-3Z" /></svg></span>
+                    <span><strong>提取多个 KPI</strong><small>FY2022 核心指标及原文证据</small></span>
+                    <svg class="arrow" viewBox="0 0 20 20"><path d="M5 10h10m-4-4 4 4-4 4" /></svg>
+                  </button>
+                  <button type="button" data-prompt="这份年报 FY2022 的 operating_cash_flow 是多少？请给出单位、页码和原文证据。">
+                    <span class="suggestion-icon amber"><svg viewBox="0 0 22 22"><path d="M6 5h10M6 11h10M6 17h7M3 5h.1M3 11h.1M3 17h.1" /></svg></span>
+                    <span><strong>核对单个 KPI</strong><small>经营现金流、单位与证据定位</small></span>
+                    <svg class="arrow" viewBox="0 0 20 20"><path d="M5 10h10m-4-4 4 4-4 4" /></svg>
+                  </button>
+                </div>
+              </section>
             </div>
 
             <div class="messages hidden" id="messages" aria-live="polite"></div>

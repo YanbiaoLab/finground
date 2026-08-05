@@ -30,10 +30,23 @@ KPI 输入、Worker 结果和错误只作为任务 `metadata`，不进入任务�
 本地原型同时提供一个面向最终用户的对话式 Web 页面。它复用 ADK 的 session、artifact 和
 `/run_sse` 接口，支持多轮对话、附件、历史 session 和实时任务进度，但不展示 thought、原始
 tool call、trace 或 performance warning 等开发调试信息。KPI 提取是对话中可发起的一类任务，
-不是固定表单或唯一页面流程；ADK Web 继续只用于开发调试。页面按照 ADK 事件的 `partial`
-语义合并流式文本，并以最终非 partial 事件替换对应的临时输出，不能把两者重复追加。
+不是固定表单或唯一页面流程；ADK Web 继续只用于开发调试。页面按照 ADK Web 的事件级规则处理
+流式文本：partial event 只与最后一个同角色 partial UI event 合并；最终非 partial event 优先按
+event id 替换，无法按 id 匹配时只替换最后一个同角色 partial event。不能按 invocation 把多个模型
+轮次拼成一个文本缓冲区，也不能重复追加 partial 与 final。
+任务进度直接消费 SSE event 的 `actions.stateDelta` 更新本地展示；运行期间不得轮询完整 session，
+每个 event 到达后按 ADK Web 的方式浅合并当前 session state，并在 `tasks` 快照变化时立即更新每个
+任务的 pending、in_progress、completed 或等待重试状态。首次收到 task delta 时展示任务区；只在
+一次 `/run_sse` 结束后读取一次 session 校准最终状态。
+`kpi_worker` event 不显示其内部文本或原始 tool payload，但页面根据 event 的 `isolationScope` 将其
+关联到对应 task，并根据 `GetKpiKnowledge`、`SearchReport`、`ReadReportChunks`、`finish_task`
+function call/response 即时展示“读取 KPI 规则、搜索年报、核验证据、等待汇总”等单任务阶段。
 消息正文支持安全的 Markdown 标题、列表、代码块和 GFM 表格；KPI 结果表使用语义化状态徽标，
 证据列允许换行，窄屏或超宽内容通过表格容器横向滚动，不能把 Markdown 分隔符作为正文展示。
+`web/raw-pdf/` 中的 PDF 自动显示为欢迎页示例文件；用户选取后只作为普通附件加入输入框。示例问题
+在独立区域中选择，只填充输入框。选择文件或问题均不自动发送，也不因选择动作启动 OCR。
+页面运行时不依赖第三方字体、图标或样式服务；展示所需字体保存在 `web/assets/fonts/`，图标使用
+本地内联 SVG，断网时保持完整布局和样式。
 
 ## 2. Goals
 
@@ -228,6 +241,8 @@ Worker 不得处理输入范围外的 KPI，也不得凭模型记忆替代 KPI �
 - 不创建或修改 Task Store，不改变 Worker 结果；
 - 一个分支在重试后仍失败时，dispatcher 将该异常转换为该 KPI 的 failed outcome；成功的 sibling
   outcomes 必须保留。dispatcher 自身无法形成 outcome 列表的异常才采用 Workflow fail-fast 语义；
+  task-mode Worker 未调用 `finish_task` 而返回空 output，或 output 不符合 `KpiTaskResult` 时，同样只
+  转换为该 KPI 的 failed outcome，不能使整个批次崩溃；
   业务上的缺失或歧义必须由 Worker 返回 `absent` 或 `ambiguous`，不能抛出异常。
 
 Root 只调用一次 dispatcher，因此不依赖模型生成并行 function calls。并发是确定性的 Workflow
@@ -236,6 +251,9 @@ Root 只调用一次 dispatcher，因此不依赖模型生成并行 function cal
 Root 和 Worker 的 ADK node 都对模型生成的非法 tool-call JSON 进行有限重试：最多执行 3 次
 （包含首次执行），且只匹配 `JSONDecodeError`。Root 重试用于避免任意规划轮次中的瞬时空白或
 截断参数直接终止 SSE；Worker 重试耗尽后仍由 dispatcher 转换为对应 KPI 的 failed outcome。
+模型响应由 ADK 官方 `LiteLlm` 客户端原样解析，不在应用层改写流式 tool-call arguments。非法或
+截断 JSON 进入上述有限重试；重试耗尽后按对应 Agent 的失败语义处理。服务未返回 usage metadata
+时不得伪造 token 统计，也不得因此中断调用。
 
 ### 5.4 Task Progress Plugin
 
@@ -585,6 +603,7 @@ ADK 标准环境配置，不由业务代码管理。
   sibling outcomes。
 - ADK Web 消息中的 Markdown 附件会自动保存为 artifact、初始化 report manifest，并从模型输入
   中移除完整正文。
+- 最终用户 Web 自动列出 `web/raw-pdf/` 中的 PDF；示例文件和示例问题分开选择，均不自动发送请求。
 - 同一用户跨 session 重复上传相同 PDF 时复用 OCR 缓存；不同用户不能共享缓存。
 - Worker 尝试在读取 KPI knowledge 前搜索年报时会被工具拒绝。
 - Worker 不能读取未经过搜索返回的 chunk。
@@ -649,9 +668,11 @@ finground/
 └── report_tools.py       # Artifact-backed full scan and bounded chunk reads
 
 web/
+├── assets/fonts/         # 本地 Web 字体及许可证
 ├── index.html            # 最终用户对话页面
 ├── styles.css            # 响应式视觉样式
-└── app.js                # ADK session、SSE、附件、消息与任务进度交互
+├── app.js                # ADK session、SSE、附件、消息与任务进度交互
+└── raw-pdf/              # 欢迎页可快速选取的原始 PDF 示例
 
 tests/
 ├── test_architecture.py

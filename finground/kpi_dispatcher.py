@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from google.adk import Context
 from google.adk.agents import Agent
 from google.adk.workflow import Workflow, node
 from google.adk.workflow._errors import DynamicNodeFailError
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from finground.kpi_worker import KpiTaskInput, KpiTaskResult, create_kpi_worker
 
 DISPATCHER_NAME = "dispatch_kpi_tasks"
 DISPATCH_ITEM_NAME = "dispatch_kpi_item"
 MAX_PARALLEL_WORKERS = 4
+
+
+class WorkerResultError(ValueError):
+    """Raised when a task-mode worker finishes without a usable result."""
 
 
 class KpiTaskBatch(BaseModel):
@@ -45,7 +50,13 @@ def _task_inputs(node_input: KpiTaskBatch) -> list[KpiTaskInput]:
     return node_input.tasks
 
 
-def _normalized_result(result: dict[str, Any]) -> KpiTaskResult:
+def _normalized_result(result: Any) -> KpiTaskResult:
+    if result is None:
+        raise WorkerResultError("kpi_worker returned no task result")
+    if not isinstance(result, Mapping):
+        raise WorkerResultError(
+            f"kpi_worker returned {type(result).__name__}, expected an object"
+        )
     nullable_fields = {
         "value": None,
         "unit": None,
@@ -89,7 +100,15 @@ def create_kpi_dispatcher(worker: Agent | None = None) -> Workflow:
                 status="failed",
                 error=_root_error_message(error),
             ).model_dump()
-        result = _normalized_result(raw_result)
+        try:
+            result = _normalized_result(raw_result)
+        except (WorkerResultError, ValidationError) as error:
+            return KpiDispatchOutcome(
+                task_id=node_input.task_id,
+                kpi_key=node_input.kpi_key,
+                status="failed",
+                error=f"{type(error).__name__}: {error}",
+            ).model_dump()
         return KpiDispatchOutcome(
             task_id=node_input.task_id,
             kpi_key=node_input.kpi_key,

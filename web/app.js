@@ -5,8 +5,10 @@ const MAX_FILE_BYTES = 100 * 1024 * 1024;
 const state = {
   userId: USER_ID,
   sessionId: null,
+  sessionState: {},
   attachment: null,
   tasks: [],
+  taskProgress: {},
   running: false,
   taskDrawerOpen: false,
   openedTasksForRun: false,
@@ -19,7 +21,7 @@ const ids = [
   "fileInput", "attachButton", "sendButton", "attachmentPreview", "attachmentType", "attachmentName",
   "attachmentSize", "removeAttachmentButton", "suggestions", "tasksButton", "tasksButtonLabel",
   "taskDrawer", "closeTasksButton", "taskProgress", "progressValue", "progressTitle", "progressMeta",
-  "taskList", "conversation", "toast",
+  "taskList", "conversation", "toast", "sampleReports", "sampleReportList",
 ];
 const elements = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
 
@@ -275,52 +277,60 @@ function addAssistantMessage({ thinking = false } = {}) {
     body: article.querySelector(".message-body"),
     content,
     text: "",
-    partialStream: null,
+    events: [],
   };
 }
 
 function renderAssistantMessage(message) {
+  message.text = message.events.map((entry) => entry.text).filter(Boolean).join("\n\n");
   message.content.innerHTML = renderMarkdown(message.text);
   scrollToLatest();
 }
 
 function appendAssistantText(message, addition) {
   if (!addition) return;
-  message.partialStream = null;
-  message.text += addition;
+  message.events.push({ id: null, author: "root_agent", partial: false, text: addition });
   renderAssistantMessage(message);
 }
 
 function updateAssistantEvent(message, event) {
   const addition = eventText(event);
   if (!addition) return;
-  const streamKey = `${event.invocationId || "current"}:${event.author}`;
+  const entry = {
+    id: event.id || null,
+    author: event.author,
+    partial: Boolean(event.partial),
+    text: addition,
+  };
 
   if (event.partial) {
-    if (!message.partialStream || message.partialStream.key !== streamKey) {
-      message.partialStream = { key: streamKey, prefix: message.text, text: "" };
+    const last = message.events.at(-1);
+    if (last?.partial && last.author === entry.author) {
+      last.id = entry.id;
+      last.text += entry.text;
+    } else {
+      message.events.push(entry);
     }
-    message.partialStream.text += addition;
-    message.text = message.partialStream.prefix + message.partialStream.text;
     renderAssistantMessage(message);
     return;
   }
 
-  if (message.partialStream?.key === streamKey) {
-    // ADK's non-partial event is the complete version of the current
-    // streamed response. Replace that stream instead of appending it.
-    message.text = message.partialStream.prefix + addition;
-  } else {
-    message.text += addition;
+  let replaceIndex = entry.id
+    ? message.events.findIndex((candidate) => candidate.id === entry.id)
+    : -1;
+  if (replaceIndex < 0) {
+    const lastIndex = message.events.length - 1;
+    const last = message.events[lastIndex];
+    if (last?.partial && last.author === entry.author) replaceIndex = lastIndex;
   }
-  message.partialStream = null;
+  if (replaceIndex >= 0) message.events[replaceIndex] = entry;
+  else message.events.push(entry);
   renderAssistantMessage(message);
 }
 
 function addHistoricalAssistant(text) {
   const message = addAssistantMessage();
-  message.text = text;
-  message.content.innerHTML = renderMarkdown(text);
+  appendAssistantText(message, text);
 }
 
 function setAttachment(file) {
@@ -342,6 +352,58 @@ function clearAttachment() {
   elements.fileInput.value = "";
   elements.attachmentPreview.classList.add("hidden");
   updateSendState();
+}
+
+function sampleReportTitle(name) {
+  return name.replace(/\.pdf$/i, "").replaceAll("_", " ");
+}
+
+function renderSampleReports(reports) {
+  elements.sampleReportList.innerHTML = "";
+  for (const report of reports) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "sample-report";
+    button.dataset.name = report.name;
+    button.dataset.url = report.url;
+    button.dataset.size = String(report.size);
+    button.innerHTML = `<span class="sample-report-icon">PDF</span><span class="sample-report-copy"><strong></strong><small></small></span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 10h10m-4-4 4 4-4 4" /></svg>`;
+    button.querySelector("strong").textContent = sampleReportTitle(report.name);
+    button.querySelector("small").textContent = `${formatBytes(report.size)} · 点击选用`;
+    elements.sampleReportList.append(button);
+  }
+  elements.sampleReports.classList.toggle("hidden", reports.length === 0);
+}
+
+async function loadSampleReports() {
+  try {
+    const reports = await request("/_finground/sample-reports");
+    renderSampleReports(Array.isArray(reports) ? reports : []);
+  } catch (_) {
+    elements.sampleReports.classList.add("hidden");
+  }
+}
+
+async function selectSampleReport(button) {
+  if (state.running) return showToast("当前回复完成后再选择示例年报");
+  const size = Number(button.dataset.size);
+  if (size > MAX_FILE_BYTES) return showToast("示例年报不能超过 100 MB");
+  button.disabled = true;
+  button.classList.add("loading");
+  try {
+    const response = await fetch(button.dataset.url);
+    if (!response.ok) throw new Error(`示例年报加载失败 (${response.status})`);
+    const blob = await response.blob();
+    const file = new File([blob], button.dataset.name, { type: "application/pdf" });
+    setAttachment(file);
+    elements.messageInput.focus();
+    showToast("示例年报已加入附件，请选择示例问题或输入自己的问题");
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    button.disabled = false;
+    button.classList.remove("loading");
+  }
 }
 
 function fileToBase64(file) {
@@ -366,6 +428,18 @@ function normalizedTasks(session) {
   return Object.values(session.state?.tasks || {}).sort((a, b) => Number(a.id) - Number(b.id));
 }
 
+function updateTasksFromSessionState({ reveal = false } = {}) {
+  state.tasks = normalizedTasks({ state: state.sessionState });
+  for (const task of state.tasks) {
+    if (task.status !== "in_progress") delete state.taskProgress[task.id];
+  }
+  renderTasks();
+  if (reveal && state.tasks.length && !state.openedTasksForRun && window.innerWidth > 980) {
+    state.openedTasksForRun = true;
+    setTaskDrawer(true);
+  }
+}
+
 function renderTasks() {
   const total = state.tasks.length;
   const completed = state.tasks.filter((task) => task.status === "completed").length;
@@ -380,7 +454,11 @@ function renderTasks() {
   elements.progressMeta.textContent = total ? `${completed} 已完成 · ${active} 进行中 · ${pending} 待处理` : "复杂工作会在这里显示实时状态";
   elements.taskList.innerHTML = total ? state.tasks.map((task) => {
     const icon = task.status === "completed" ? "✓" : task.status === "pending" ? "·" : "";
-    const detail = task.status === "completed" ? "已完成" : task.status === "in_progress" ? (task.activeForm || "正在执行") : task.metadata?.error ? "等待重试" : "等待执行";
+    const detail = task.status === "completed"
+      ? "已完成"
+      : task.status === "in_progress"
+        ? (state.taskProgress[task.id] || task.activeForm || "正在执行")
+        : task.metadata?.error ? "等待重试" : "等待执行";
     return `<div class="task-item"><span class="task-state ${escapeHtml(task.status)}">${icon}</span><div><strong>${escapeHtml(task.subject)}</strong><span>${escapeHtml(detail)}</span></div></div>`;
   }).join("") : `<div class="task-empty">发送一个复杂任务后，执行计划会出现在这里。</div>`;
   renderInlineProgress(percent, completed, total, active);
@@ -415,18 +493,56 @@ async function saveConversationTitle(title) {
 async function refreshSession() {
   if (!state.sessionId) return null;
   const session = await request(sessionUrl(state.sessionId));
-  state.tasks = normalizedTasks(session);
-  renderTasks();
-  if (state.tasks.length && !state.openedTasksForRun && window.innerWidth > 980) {
-    state.openedTasksForRun = true;
-    setTaskDrawer(true);
-  }
+  state.sessionState = session.state || {};
+  updateTasksFromSessionState({ reveal: state.running });
   return session;
 }
 
 function eventText(event) {
   if (event.author !== "root_agent" || !event.content?.parts) return "";
   return event.content.parts.filter((part) => part.text && !part.thought).map((part) => part.text).join("");
+}
+
+function processEventStateDelta(event) {
+  const stateDelta = event.actions?.stateDelta;
+  if (!stateDelta || typeof stateDelta !== "object") return;
+  state.sessionState = { ...state.sessionState, ...stateDelta };
+  if (Object.hasOwn(stateDelta, "tasks")) {
+    updateTasksFromSessionState({ reveal: state.running });
+  }
+}
+
+function workerTaskId(event) {
+  if (event.author !== "kpi_worker" || !event.isolationScope) return null;
+  const taskId = event.isolationScope.split("/").filter(Boolean).at(-1);
+  return state.tasks.some((task) => task.id === taskId) ? taskId : null;
+}
+
+function workerPhaseForPart(part) {
+  const tool = part.functionCall?.name || part.functionResponse?.name;
+  if (tool === "GetKpiKnowledge") return "正在读取 KPI 规则";
+  if (tool === "SearchReport") return "正在搜索年报";
+  if (tool === "ReadReportChunks") return "正在核验证据";
+  if (tool === "finish_task") return "结果已返回，等待汇总";
+  return null;
+}
+
+function processWorkerProgressEvent(event) {
+  const taskId = workerTaskId(event);
+  if (!taskId) return;
+  let phase = event.output ? "结果已返回，等待汇总" : null;
+  for (const part of event.content?.parts || []) {
+    phase = workerPhaseForPart(part) || phase;
+  }
+  if (!phase) return;
+  state.taskProgress[taskId] = phase;
+  renderTasks();
+}
+
+function processRunEvent(event) {
+  processEventStateDelta(event);
+  processWorkerProgressEvent(event);
+  updateAssistantEvent(state.activeAssistantContent, event);
 }
 
 async function streamRun(parts) {
@@ -445,24 +561,30 @@ async function streamRun(parts) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  let lastRefresh = 0;
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const records = buffer.split("\n\n");
+  const consumeRecords = () => {
+    const records = buffer.split(/\r?\n\r?\n/);
     buffer = records.pop() || "";
     for (const record of records) {
-      const line = record.split("\n").find((item) => item.startsWith("data:"));
-      if (!line) continue;
-      const event = JSON.parse(line.slice(5).trim());
+      const payload = record.split(/\r?\n/)
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trimStart())
+        .join("\n");
+      if (!payload) continue;
+      const event = JSON.parse(payload);
       if (event.error) throw new Error(event.error);
-      updateAssistantEvent(state.activeAssistantContent, event);
+      processRunEvent(event);
     }
-    if (Date.now() - lastRefresh > 500) {
-      await refreshSession();
-      lastRefresh = Date.now();
+  };
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      buffer += decoder.decode();
+      if (buffer.trim()) buffer += "\n\n";
+      consumeRecords();
+      break;
     }
+    buffer += decoder.decode(value, { stream: true });
+    consumeRecords();
   }
 }
 
@@ -473,6 +595,7 @@ async function sendMessage() {
   const messageText = typedText || "请阅读这份文件，并告诉我你能提供哪些帮助。";
   state.running = true;
   state.openedTasksForRun = false;
+  state.taskProgress = {};
   state.activeProgress = null;
   updateSendState();
   addUserMessage(messageText, attachment);
@@ -484,6 +607,7 @@ async function sendMessage() {
     if (!state.sessionId) {
       const session = await createSession();
       state.sessionId = session.id;
+      state.sessionState = session.state || {};
       history.replaceState(null, "", `/?session=${encodeURIComponent(session.id)}`);
       await saveConversationTitle(messageText);
     }
@@ -516,24 +640,19 @@ function cleanUserText(event) {
 
 function renderSession(session) {
   elements.messages.innerHTML = "";
+  state.taskProgress = {};
+  state.sessionState = session.state || {};
   state.tasks = normalizedTasks(session);
-  let assistantBuffer = "";
-  const flushAssistant = () => {
-    if (assistantBuffer.trim()) addHistoricalAssistant(assistantBuffer);
-    assistantBuffer = "";
-  };
   for (const event of session.events || []) {
     if (event.partial) continue;
     const userText = cleanUserText(event);
     if (userText) {
-      flushAssistant();
       addUserMessage(userText);
       continue;
     }
     const text = eventText(event);
-    if (text) assistantBuffer += text;
+    if (text) addHistoricalAssistant(text);
   }
-  flushAssistant();
   if (elements.messages.children.length) ensureConversationVisible();
   else {
     elements.messages.classList.add("hidden");
@@ -582,7 +701,9 @@ async function openSession(sessionId) {
 function newChat() {
   if (state.running) return showToast("当前回复完成后再新建对话");
   state.sessionId = null;
+  state.sessionState = {};
   state.tasks = [];
+  state.taskProgress = {};
   state.attachment = null;
   state.taskDrawerOpen = false;
   elements.messages.innerHTML = "";
@@ -619,6 +740,10 @@ function bindEvents() {
     updateSendState();
     elements.messageInput.focus();
   });
+  elements.sampleReportList.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-url]");
+    if (button) selectSampleReport(button);
+  });
   elements.historyList.addEventListener("click", (event) => {
     const button = event.target.closest("[data-session]");
     if (button) openSession(button.dataset.session);
@@ -628,7 +753,7 @@ function bindEvents() {
 async function initialize() {
   bindEvents();
   renderTasks();
-  await loadHistory();
+  await Promise.all([loadHistory(), loadSampleReports()]);
   const sessionId = new URLSearchParams(location.search).get("session");
   if (sessionId) await openSession(sessionId);
   elements.messageInput.focus();
