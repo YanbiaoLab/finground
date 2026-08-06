@@ -218,7 +218,7 @@ def test_pdf_ocr_failure_is_propagated() -> None:
     assert client.calls == 1
 
 
-def test_pdf_ocr_cache_is_reused_across_sessions_but_not_users() -> None:
+def test_pdf_ocr_cache_is_reused_across_sessions_and_users() -> None:
     async def run() -> tuple[int, types.Part, list[str]]:
         ocr_client = StubOcrClient()
         root = Agent(
@@ -272,15 +272,15 @@ def test_pdf_ocr_cache_is_reused_across_sessions_but_not_users() -> None:
             session_id="two",
             filename="renamed.ocr.md",
         )
-        keys = await artifacts.list_artifact_keys(
+        cache_keys = await artifacts.list_artifact_keys(
             app_name=app.name,
-            user_id="user",
-            session_id="two",
+            user_id="finground-ocr-cache",
+            session_id="global",
         )
-        return ocr_client.calls, second_artifact, keys
+        return ocr_client.calls, second_artifact, cache_keys
 
-    calls, artifact, keys = asyncio.run(run())
+    calls, artifact, cache_keys = asyncio.run(run())
 
-    assert calls == 2
+    assert calls == 1
     assert b"Revenue 123" in artifact.inline_data.data
-    assert any(key.startswith("user:.finground/ocr/") for key in keys)
+    assert any(key.startswith(".finground/ocr/") for key in cache_keys)

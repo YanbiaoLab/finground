@@ -35,9 +35,7 @@ function getBrowserUserId() {
   try {
     const existing = localStorage.getItem(BROWSER_ID_STORAGE_KEY);
     if (existing) return existing;
-  } catch (_) {
-    return "user";
-  }
+  } catch (_) {}
 
   const browserId = `browser-${crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`}`;
   try {
