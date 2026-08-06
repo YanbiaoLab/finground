@@ -1,9 +1,9 @@
 const APP_NAME = "finground";
-const USER_ID = "user";
+const BROWSER_ID_STORAGE_KEY = "finground-browser-user-id";
 const MAX_FILE_BYTES = 100 * 1024 * 1024;
 
 const state = {
-  userId: USER_ID,
+  userId: getBrowserUserId(),
   sessionId: null,
   sessionState: {},
   attachment: null,
@@ -29,6 +29,23 @@ function escapeHtml(value = "") {
   const node = document.createElement("div");
   node.textContent = String(value);
   return node.innerHTML;
+}
+
+function getBrowserUserId() {
+  try {
+    const existing = localStorage.getItem(BROWSER_ID_STORAGE_KEY);
+    if (existing) return existing;
+  } catch (_) {
+    return "user";
+  }
+
+  const browserId = `browser-${crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`}`;
+  try {
+    localStorage.setItem(BROWSER_ID_STORAGE_KEY, browserId);
+  } catch (_) {
+    return browserId;
+  }
+  return browserId;
 }
 
 function renderInlineMarkdown(value = "") {

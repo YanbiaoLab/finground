@@ -25,7 +25,9 @@ from finground.report_tools import REPORT_STATE_KEY
 _PENDING_ARTIFACTS_KEY = "temp:report_upload_artifacts"
 _PENDING_MANIFEST_KEY = "temp:report_upload_manifest"
 _PAGE_BREAK = re.compile(r"<---\s*Page Split\s*--->", re.IGNORECASE)
-_OCR_CACHE_ROOT = "user:.finground/ocr"
+_OCR_CACHE_ROOT = ".finground/ocr"
+_OCR_CACHE_GLOBAL_USER_ID = "finground-ocr-cache"
+_OCR_CACHE_GLOBAL_SESSION_ID = "global"
 
 logger = logging.getLogger(__name__)
 
@@ -101,8 +103,8 @@ class ReportUploadPlugin(BasePlugin):
         try:
             artifact = await invocation_context.artifact_service.load_artifact(
                 app_name=invocation_context.app_name,
-                user_id=invocation_context.user_id,
-                session_id=invocation_context.session.id,
+                user_id=_OCR_CACHE_GLOBAL_USER_ID,
+                session_id=_OCR_CACHE_GLOBAL_SESSION_ID,
                 filename=filename,
             )
         except Exception:  # noqa: BLE001 - cache failure must not block OCR
@@ -125,8 +127,8 @@ class ReportUploadPlugin(BasePlugin):
         try:
             await invocation_context.artifact_service.save_artifact(
                 app_name=invocation_context.app_name,
-                user_id=invocation_context.user_id,
-                session_id=invocation_context.session.id,
+                user_id=_OCR_CACHE_GLOBAL_USER_ID,
+                session_id=_OCR_CACHE_GLOBAL_SESSION_ID,
                 filename=filename,
                 artifact=artifact,
             )
