@@ -23,6 +23,13 @@ def create_web_app():
         use_local_storage=True,
     )
 
+    @app.middleware("http")
+    async def prevent_stale_product_ui(request, call_next):
+        response = await call_next(request)
+        if request.url.path in {"/", "/index.html", "/app.js", "/styles.css"}:
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     @app.get("/_finground/sample-reports")
     async def sample_reports() -> list[dict[str, str | int]]:
         return [
