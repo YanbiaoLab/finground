@@ -26,6 +26,9 @@ FinGround 是一个基于 Google ADK 的多 Agent 年报研究系统。用户可
 KPI 输入、Worker 结果和错误只作为任务 `metadata`，不进入任务工具的数据模型。一个 ADK Plugin
 在运行期间检查任务状态，并向 Root 注入未完成任务提醒。KPI 的定义和提取规则是结构化数据，
 不写入 Root prompt，也不拆成多个 KPI Agent。
+`TaskUpdate` 的外层任务标识固定使用 `taskId`；即使 metadata 中存在 Worker 的 `task_id`，Root 也
+必须显式传递 `taskId`。缺失时工具返回不修改状态的结构化参数错误，使 Root 可以修正调用，而不以
+`KeyError` 终止整次请求。
 
 本阶段只实现本地原型。部署、CI/CD、外部数据库、向量检索、SEC/XBRL 数据和 benchmark
 框架均不在范围内。
@@ -213,10 +216,13 @@ Root 的唯一职责：
 1. 理解请求并按用户给出的 KPI key 规划任务；KPI 是否受支持由 Worker 的知识工具判断。
 2. 为每个 KPI 建立一个通用任务，把 Worker 输入放入 `metadata.task_input`。
 3. 按顺序将任务标记为 `in_progress` 并设置 owner；任务工具不得并行写 session state。
-4. 一次调用 `dispatch_kpi_tasks`，传递所有独立的单 KPI 输入。
-5. dispatcher 按输入顺序返回逐项 outcome 后，Root 将成功项的 `result` 原样写入对应任务的
-   `metadata.result` 并完成任务；只把失败项返回 `pending`，写入该项的 `metadata.error`。
-   只有 dispatcher 本身未能返回任何 outcomes 时，才把整批受影响任务返回 `pending`。
+4. 调用 `dispatch_kpi_tasks`，传递所有独立的单 KPI 输入；若返回的失败项明确标记
+   `retryable=true`，只对这些失败项按原始输入额外重试一次，不得重跑成功项。
+5. dispatcher 按输入顺序返回逐项 outcome 后，Root 先对 `retryable=true` 的失败项执行最多一次
+   单项重试，再将最终成功项的 `result` 原样写入对应任务的 `metadata.result` 并完成任务；只把最终
+   失败项返回 `pending`，写入该项的 `metadata.error`、`metadata.error_code` 和
+   `metadata.retryable`。只有 dispatcher 本身未能返回任何 outcomes 时，才把整批受影响任务返回
+   `pending`。
 6. 检查是否还有未完成任务。
 7. 汇总结果并回答用户。
 
@@ -232,6 +238,10 @@ Root 不拥有以下能力：
 - 选择证据；
 - 计算、缩放或修正财务数值；
 - 直接创建 KPI 结果。
+
+`dispatch_kpi_tasks` 的工具描述从 KPI 目录动态列出全部受支持的 canonical key，使 Root 能在
+创建任务前感知目录边界。用户请求的指标不在该列表中、但可以从当前年报回答时，Root 将用户的
+原始表述作为通用年报问题交给 `answer_report_question`，不得虚构 canonical key 或先派发 KPI Worker。
 
 ### 5.2 KPI Worker
 
@@ -290,17 +300,20 @@ Worker 不得联网、不得根据常识补足年报未披露的信息、不得�
 - 每个 outcome 在 dispatcher 内部完成 Pydantic 校验；对 Root 模型只暴露浅层 JSON list 返回
   schema，避免把完整嵌套结果模型重复加入 tool declarations；
 - 不创建或修改 Task Store，不改变 Worker 结果；
-- 一个分支在重试后仍失败时，dispatcher 将该异常转换为该 KPI 的 failed outcome；成功的 sibling
+- 一个分支在 node 重试后仍失败时，dispatcher 将该异常转换为带 `error_code`、友好 `error` 和
+  `retryable` 建议的 failed outcome；技术异常只写服务日志，不能原样暴露给用户。成功的 sibling
   outcomes 必须保留。dispatcher 自身无法形成 outcome 列表的异常才采用 Workflow fail-fast 语义；
   task-mode Worker 未调用 `finish_task` 而返回空 output，或 output 不符合 `KpiTaskResult` 时，同样只
   转换为该 KPI 的 failed outcome，不能使整个批次崩溃；
   业务上的缺失或歧义必须由 Worker 返回 `absent` 或 `ambiguous`，不能抛出异常。
 
-Root 只调用一次 dispatcher，因此不依赖模型生成并行 function calls。并发是确定性的 Workflow
-行为，而不是 prompt 建议。
+Root 首次调用 dispatcher 时包含全部任务；若存在 `retryable=true` 的失败 outcome，Root 最多额外
+调用一次 dispatcher，且只传入这些失败项的原始输入。Root 不得重跑成功项或不可重试失败项，也不得
+进行第三次调用。首次批量执行的并发仍是确定性的 Workflow 行为，不依赖模型生成并行 function calls。
 
 `answer_report_question` 是单任务 Workflow Tool。它在以 task ID 命名的隔离 scope 中运行一个
-`report_qa_worker`，校验其结构化输出，并把运行异常或空输出转换为失败 outcome。它不写 Task Store。
+`report_qa_worker`，校验其结构化输出，并把运行异常、非法 JSON 或空输出转换为带稳定错误码、
+重试建议和友好消息的失败 outcome；底层异常只写服务日志。它不写 Task Store。
 其 outcome 同样在 Workflow 内部强类型校验，对 Root 只暴露浅层 JSON object 返回 schema。
 
 Root 和 Worker 的 ADK node 都对模型生成的非法 tool-call JSON 进行有限重试：最多执行 3 次
@@ -493,12 +506,15 @@ evidence；`absent` 必须在 notes 中说明已检查的范围。
   "kpi_key": "capex",
   "status": "failed",
   "result": null,
-  "error": "JSONDecodeError: Unterminated string ..."
+  "error": "KPI worker did not return a valid structured response after 3 attempts. Retry only this KPI and keep successful sibling results.",
+  "error_code": "worker_invalid_json",
+  "retryable": true
 }
 ```
 
-Outcome 必须与输入顺序一致。`succeeded` 必须包含且只能包含 `result`；`failed` 必须包含且只能
-包含 `error`。
+Outcome 必须与输入顺序一致。`succeeded` 必须包含 `result`，失败指导字段为空；`failed` 必须包含
+友好的 `error`、稳定的 `error_code` 和布尔值 `retryable`，且不能包含 `result`。底层异常类名、解析器
+错误和堆栈只进入服务日志，不作为面向用户的错误内容。
 
 ### 6.6 Report Question Input and Result
 
@@ -664,15 +680,18 @@ ADK 标准环境配置，不由业务代码管理。
 1. Root 对两个 KPI key 规划独立工作；Root 本身不读取或校验 KPI 知识。
 2. Root 分别创建任务 `1` 和 `2`，业务输入保存在 metadata。
 3. Root 按顺序把任务 `1` 和 `2` 更新为 `in_progress`，owner 设为 `kpi_worker`。
-4. Root 调用一次 `dispatch_kpi_tasks`，传入两个带 task ID 的单 KPI 输入。
+4. Root 首次调用 `dispatch_kpi_tasks`，传入两个带 task ID 的单 KPI 输入。
 5. Workflow 在隔离分支中并行运行两个 Worker；每个 Worker 读取自己的 KPI knowledge、检索
    年报、读取证据并调用 `finish_task`。
 6. Workflow 按输入顺序聚合逐项 outcomes 并返回 Root。
-7. Root 把成功 outcome 的 result 原样写入对应任务的 `metadata.result` 并完成任务；
-   失败 outcome 只更新对应任务的 `metadata.error` 并返回 `pending`。
-8. Plugin 在每次任务工具调用后提醒剩余任务。
-9. Root 调用 `TaskList`；只有所有任务都为 `completed` 时才宣称全部完成。
-10. 最终回答列出成功结果和仍未完成的任务，不隐藏不完整状态。
+7. 若存在 `retryable=true` 的失败项，Root 只对这些项额外调用一次 dispatcher，并以重试 outcome
+   替换首次失败 outcome；成功 sibling 不重跑。
+8. Root 把最终成功 outcome 的 result 原样写入对应任务的 `metadata.result` 并完成任务；
+   最终失败 outcome 写入对应任务的 `metadata.error`、`metadata.error_code` 和
+   `metadata.retryable` 并返回 `pending`。
+9. Plugin 在每次任务工具调用后提醒剩余任务。
+10. Root 调用 `TaskList`；只有所有任务都为 `completed` 时才宣称全部完成。
+11. 最终回答列出成功结果和仍未完成的任务，不隐藏不完整状态，也不暴露底层异常原文。
 
 ## 9. Constraints & Safety Rules
 
@@ -711,8 +730,8 @@ ADK 标准环境配置，不由业务代码管理。
 ### Behavioral
 
 - 一个两 KPI 请求产生两个独立任务。
-- 一个多 KPI 请求只调用一次 dispatcher；dispatcher 确实同时运行多个 Worker，最大并发数为 4，
-  并按输入顺序返回 outcomes。
+- 一个多 KPI 请求首次只调用一次 dispatcher；dispatcher 确实同时运行多个 Worker，最大并发数为
+  4，并按输入顺序返回 outcomes。只有 `retryable=true` 的失败项可以被 Root 单独额外重试一次。
 - Root 或单个 Worker 的非法 tool-call JSON 最多尝试 3 次；Worker 最终失败不得丢弃已成功的
   sibling outcomes。
 - ADK Web 消息中的 Markdown 附件会自动保存为 artifact、初始化 report manifest，并从模型输入
@@ -757,8 +776,9 @@ ADK 标准环境配置，不由业务代码管理。
 - Report tool 累计预算耗尽：Worker 返回 ambiguous，并在 notes 中记录预算耗尽。
 - 搜索命中多个年份或多个范围：Worker 读取证据页；无法消除歧义时返回 ambiguous。
 - 单位缺失或作用范围不清：不得推断单位，返回 ambiguous。
-- Task-mode Worker 生成非法 tool-call JSON：ADK node 最多尝试 3 次；仍失败时只将该项
-  错误记入 metadata 并返回 pending，不回滚成功 sibling。
+- Task-mode Worker 生成非法 tool-call JSON：ADK node 最多尝试 3 次；仍失败时 dispatcher 返回
+  `worker_invalid_json`、友好错误和 `retryable=true`。Root 只对该项额外重试一次；再次失败后将
+  结构化错误记入 metadata 并返回 pending，不回滚成功 sibling，也不向用户显示解析异常原文。
 - Root 生成空白、截断或其他非法 tool-call JSON：ADK node 最多尝试 3 次；不得立即终止 SSE。
 - 部分 KPI 成功、部分未完成：Root 返回部分结果和明确的失败清单。
 - PDF 提取缓存损坏、不可读或写入失败：忽略缓存并完成正常提取流程；不得缓存失败、截断或覆盖不足的输出。

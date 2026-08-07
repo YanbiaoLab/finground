@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from collections.abc import Mapping
 from typing import Any, Literal
 
@@ -11,7 +13,8 @@ from google.adk.workflow import Workflow, node
 from google.adk.workflow._errors import DynamicNodeFailError
 from pydantic import BaseModel, ValidationError, model_validator
 
-from finground.kpi_dispatcher import WorkerResultError, root_error_message
+from finground.kpi_dispatcher import WorkerResultError
+from finground.kpi_worker import TOOL_CALL_MAX_ATTEMPTS
 from finground.report_qa_worker import (
     ReportQuestionInput,
     ReportQuestionResult,
@@ -20,6 +23,13 @@ from finground.report_qa_worker import (
 
 REPORT_QA_DISPATCHER_NAME = "answer_report_question"
 REPORT_QA_NODE_NAME = "answer_report_question_item"
+logger = logging.getLogger(__name__)
+
+ReportQuestionErrorCode = Literal[
+    "worker_invalid_json",
+    "worker_invalid_result",
+    "worker_execution_failed",
+]
 
 
 class ReportQuestionOutcome(BaseModel):
@@ -29,14 +39,54 @@ class ReportQuestionOutcome(BaseModel):
     status: Literal["succeeded", "failed"]
     result: ReportQuestionResult | None = None
     error: str | None = None
+    error_code: ReportQuestionErrorCode | None = None
+    retryable: bool | None = None
 
     @model_validator(mode="after")
     def validate_outcome(self) -> ReportQuestionOutcome:
-        if self.status == "succeeded" and (self.result is None or self.error is not None):
-            raise ValueError("succeeded outcome requires result and forbids error")
-        if self.status == "failed" and (self.result is not None or not self.error):
-            raise ValueError("failed outcome requires error and forbids result")
+        failure_fields = (self.error, self.error_code, self.retryable)
+        if self.status == "succeeded" and (
+            self.result is None or any(value is not None for value in failure_fields)
+        ):
+            raise ValueError("succeeded outcome requires only result")
+        if self.status == "failed" and (
+            self.result is not None
+            or not self.error
+            or self.error_code is None
+            or self.retryable is None
+        ):
+            raise ValueError("failed outcome requires structured failure guidance")
         return self
+
+
+def _root_error(error: DynamicNodeFailError) -> Exception:
+    root_error: Exception = error
+    seen: set[int] = set()
+    while isinstance(root_error, DynamicNodeFailError) and id(root_error) not in seen:
+        seen.add(id(root_error))
+        root_error = root_error.error
+    return root_error
+
+
+def _worker_failure(error: Exception) -> tuple[ReportQuestionErrorCode, str, bool]:
+    if isinstance(error, json.JSONDecodeError):
+        return (
+            "worker_invalid_json",
+            "Report QA worker did not return a valid structured response after "
+            f"{TOOL_CALL_MAX_ATTEMPTS} attempts.",
+            True,
+        )
+    if isinstance(error, (WorkerResultError, ValidationError)):
+        return (
+            "worker_invalid_result",
+            "Report QA worker returned an incomplete or invalid structured result.",
+            True,
+        )
+    return (
+        "worker_execution_failed",
+        "Report QA worker could not complete this question.",
+        False,
+    )
 
 
 def _normalized_result(result: Any) -> ReportQuestionResult:
@@ -68,18 +118,37 @@ def create_report_qa_dispatcher(worker: Agent | None = None) -> Workflow:
                 override_isolation_scope=isolation_scope,
             )
         except DynamicNodeFailError as error:
+            root_error = _root_error(error)
+            error_code, message, retryable = _worker_failure(root_error)
+            logger.warning(
+                "Report QA worker failed for task_id=%s: %s: %s",
+                node_input.task_id,
+                type(root_error).__name__,
+                root_error,
+            )
             return ReportQuestionOutcome(
                 task_id=node_input.task_id,
                 status="failed",
-                error=root_error_message(error),
+                error=message,
+                error_code=error_code,
+                retryable=retryable,
             ).model_dump()
         try:
             result = _normalized_result(raw_result)
         except (WorkerResultError, ValidationError) as error:
+            error_code, message, retryable = _worker_failure(error)
+            logger.warning(
+                "Report QA worker returned an invalid result for task_id=%s: %s: %s",
+                node_input.task_id,
+                type(error).__name__,
+                error,
+            )
             return ReportQuestionOutcome(
                 task_id=node_input.task_id,
                 status="failed",
-                error=f"{type(error).__name__}: {error}",
+                error=message,
+                error_code=error_code,
+                retryable=retryable,
             ).model_dump()
         return ReportQuestionOutcome(
             task_id=node_input.task_id,

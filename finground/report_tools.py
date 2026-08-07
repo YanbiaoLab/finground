@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import secrets
 from typing import Any
@@ -27,6 +28,7 @@ MAX_READ_CHUNKS = 3
 MAX_READ_CHARS = 18_000
 MAX_TOTAL_OUTPUT_CHARS = 480_000
 PAGE_BREAK_PATTERN = re.compile(r"<---\s*Page Split\s*--->", re.IGNORECASE)
+logger = logging.getLogger(__name__)
 
 
 def _error(message: str, *, budget_exhausted: bool = False) -> dict[str, Any]:
@@ -140,7 +142,8 @@ async def _load_chunks(
         try:
             chunks = [json.loads(line) for line in text.splitlines() if line.strip()]
         except json.JSONDecodeError as exc:
-            return [], _error(f"report artifact is invalid JSONL: {exc}")
+            logger.warning("Report artifact %s contains invalid JSONL: %s", artifact_name, exc)
+            return [], _error("report artifact is invalid JSONL")
     for chunk in chunks:
         if not isinstance(chunk, dict) or not {
             "chunk_id",

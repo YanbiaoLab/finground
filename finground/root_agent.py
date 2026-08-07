@@ -21,6 +21,9 @@ report evidence, calculate KPI values, or alter a worker result.
 
 Whenever you call a tool, call exactly one tool and supply one complete, valid JSON object for its
 arguments. Never emit empty, whitespace-only, partial, or prose-form tool arguments.
+Every TaskUpdate call must include the target task's outer taskId, even when metadata.task_input or
+metadata.result already contains a nested task_id. If TaskUpdate reports a missing taskId, retry the
+same intended update once with the task ID returned by TaskCreate; do not start the worker again.
 
 When an upload placeholder supplies a report_ref, copy it exactly into every related task and worker
 input. Never invent, rewrite, or guess a report_ref.
@@ -32,16 +35,23 @@ For each requested canonical KPI:
    parallel because their state changes are ordered.
 2. After creating all tasks, add each returned task ID to its metadata.task_input and set each task
    to in_progress with owner {WORKER_NAME}, one update at a time.
-3. Call {DISPATCHER_NAME} once with all exact single-KPI task inputs. Do not call it alongside any
-   other tool. It returns one outcome per input in the same order.
-4. For each succeeded outcome, preserve outcome.result exactly in the matching task's
+3. Call {DISPATCHER_NAME} with all exact single-KPI task inputs. Do not call it alongside any other
+   tool. It returns one outcome per input in the same order. If any outcome has status failed and
+   retryable=true, call {DISPATCHER_NAME} at most one more time with only those failed tasks' exact
+   original inputs. Never rerun a succeeded task, never include a non-retryable failure, and never
+   make a third dispatcher call. Replace each retried task's first outcome with its retry outcome.
+4. For each final succeeded outcome, preserve outcome.result exactly in the matching task's
    metadata.result, clear any stale error, and complete that task, one update at a time.
-5. For each failed outcome, return only that matching task to pending and record outcome.error in
-   metadata.error. Do not discard or roll back successful sibling outcomes. If the dispatcher itself
-   fails before returning outcomes, return every affected task to pending and record the dispatch
-   error so each remains visible and retryable.
+5. For each final failed outcome, return only that matching task to pending and record outcome.error,
+   outcome.error_code, and outcome.retryable in metadata. Do not discard or roll back successful
+   sibling outcomes. If the dispatcher itself fails before returning outcomes, return every affected
+   task to pending and record the dispatch error so each remains visible and retryable.
 6. Inspect the task list before answering. Do not claim completion while any task is pending or
-   in_progress; report incomplete work honestly.
+   in_progress; report incomplete work honestly. Never expose exception class names, JSON parser
+   messages, or stack details to the user. When a final failed outcome remains after retry, say that
+   KPI extraction temporarily failed to return a valid result, that the automatic retry was
+   exhausted, and which KPI remains unfinished. Do not describe a succeeded absent or ambiguous
+   worker result as an execution failure.
 
 For a question about the uploaded annual report that is not a canonical KPI extraction:
 1. Create one task with metadata.task_input containing report_ref and the user's exact question.
@@ -49,13 +59,18 @@ For a question about the uploaded annual report that is not a canonical KPI extr
    {REPORT_QA_WORKER_NAME}. Keep task-management calls sequential.
 3. Call {REPORT_QA_DISPATCHER_NAME} once with that exact task input and not alongside another tool.
 4. On success, preserve outcome.result exactly in metadata.result, clear any stale error, and
-   complete the task. On failure, return the task to pending and record outcome.error.
+   complete the task. On failure, return the task to pending and record outcome.error,
+   outcome.error_code, and outcome.retryable. Never expose parser or exception details.
 5. Inspect the task list before answering and cite the worker evidence in a readable response.
 
 Route canonical KPI extraction through {DISPATCHER_NAME}, never through
-{REPORT_QA_DISPATCHER_NAME}. If one user request mixes KPI extraction with other report questions,
-create all necessary tasks and run the appropriate dispatcher for each task type. Questions that do
-not require the uploaded report do not need a task or worker.
+{REPORT_QA_DISPATCHER_NAME}. Use {DISPATCHER_NAME} only for kpi_key values explicitly listed in that
+tool's description. Treat a requested metric outside that list as a non-canonical annual-report
+question and assign it to {REPORT_QA_DISPATCHER_NAME} when the current report can answer it; preserve
+the user's exact wording as the question instead of inventing a canonical kpi_key. If one user
+request mixes KPI extraction with other report questions, create all necessary tasks and run the
+appropriate dispatcher for each task type. Questions that do not require the uploaded report do not
+need a task or worker.
 """
 
 

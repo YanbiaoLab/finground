@@ -78,6 +78,19 @@ def test_general_question_requires_preparation_before_report_access() -> None:
     assert result["items"][0]["chunk_id"] == "ACME_2025:p10:c0"
 
 
+def test_invalid_jsonl_returns_stable_error_without_parser_details() -> None:
+    context = _context([])
+    context.artifact = types.Part.from_bytes(
+        data=b'{"chunk_id":', mime_type="application/x-ndjson"
+    )
+    get_kpi_knowledge("revenue", context)
+
+    result = asyncio.run(search_report("ACME_2025", "revenue", "", 8, context))
+
+    assert result["status"] == "error"
+    assert result["error"] == "report artifact is invalid JSONL"
+
+
 def test_kpi_knowledge_does_not_replace_general_question_preparation() -> None:
     context = _context([_chunk(10, "The company depends on a limited number of suppliers.")])
     context.agent_name = "report_qa_worker"
