@@ -707,6 +707,10 @@ function renderSession(session) {
     const text = eventText(event);
     if (text) addHistoricalAssistant(text);
   }
+  if (!elements.messages.children.length && session.state?.conversation_title) {
+    addUserMessage(session.state.conversation_title);
+    addHistoricalAssistant("这条对话没有保存可显示的回复。你可以重新发送问题。");
+  }
   if (elements.messages.children.length) ensureConversationVisible();
   else {
     elements.messages.classList.add("hidden");
