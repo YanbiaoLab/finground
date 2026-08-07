@@ -2,7 +2,6 @@ const APP_NAME = "finground";
 const BROWSER_ID_STORAGE_KEY = "finground-browser-user-id";
 const MAX_FILE_BYTES = 100 * 1024 * 1024;
 const DEFAULT_MESSAGE_PLACEHOLDER = "给 FinGround 发消息…";
-const KPI_CANDIDATES = ["revenue", "gross_profit", "operating_income", "net_income", "operating_cash_flow"];
 
 const state = {
   userId: getBrowserUserId(),
@@ -351,30 +350,15 @@ function addHistoricalAssistant(text) {
   appendAssistantText(message, text);
 }
 
-function shuffled(values) {
-  const result = [...values];
-  for (let index = result.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(Math.random() * (index + 1));
-    [result[index], result[swapIndex]] = [result[swapIndex], result[index]];
-  }
-  return result;
-}
-
 function attachmentQuestionSuggestions(fileName) {
   const year = fileName.match(/(?:19|20)\d{2}/)?.[0];
   const period = year ? `FY${year}` : "报告期内";
-  const kpis = shuffled(KPI_CANDIDATES);
-  const exploratoryQuestions = shuffled([
-    `请分析这份文件在 ${period} 的主要业务风险，并附上页码和原文证据。`,
-    `请总结这份文件在 ${period} 的关键经营变化，并解释背后的原因。`,
-    `请比较这份文件中 ${period} 与上一年度的主要财务趋势，并附上原文证据。`,
-    `请找出这份文件在 ${period} 最值得关注的三项信息，并说明原因。`,
-    `请总结这份文件披露的战略重点、竞争优势和潜在挑战。`,
-  ]);
   return [
-    `这份文件 ${period} 的 ${kpis[0]} 是多少？请给出单位、页码和原文证据。`,
-    `请提取这份文件 ${period} 的 ${kpis.slice(1, 4).join("、")}，并附上单位、页码和原文证据。`,
-    ...exploratoryQuestions.slice(0, 3),
+    `这份年报 ${period} 的 revenue 是多少？请给出数值、单位、页码和原文证据。`,
+    `请提取这份年报 ${period} 的 revenue、operating_income 和 net_income，并附上单位、页码和原文证据。`,
+    `请根据 revenue 和 gross_profit 计算 ${period} 的毛利率，并附上计算过程、单位、页码和原文证据。`,
+    `请比较 ${period} 的 net_income 与 operating_cash_flow，说明两者差异，并提供数值、单位、页码和原文证据。`,
+    `请根据 ${period} 的 operating_income 和 revenue 计算营业利润率，并附上计算过程、单位、页码和原文证据。`,
   ];
 }
 
