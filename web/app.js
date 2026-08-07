@@ -15,7 +15,7 @@ const state = {
   openedTasksForRun: false,
   activeAssistantContent: null,
   activeProgress: null,
-  hasAttachmentQuestionSuggestion: false,
+  attachmentQuestionSuggestion: null,
 };
 
 const ids = [
@@ -377,14 +377,14 @@ function setAttachment(file) {
     const suggestions = attachmentQuestionSuggestions(file.name);
     const suggestion = suggestions[Math.floor(Math.random() * suggestions.length)];
     elements.messageInput.placeholder = suggestion;
-    state.hasAttachmentQuestionSuggestion = true;
+    state.attachmentQuestionSuggestion = suggestion;
   }
   updateSendState();
 }
 
 function clearAttachment() {
   state.attachment = null;
-  state.hasAttachmentQuestionSuggestion = false;
+  state.attachmentQuestionSuggestion = null;
   elements.fileInput.value = "";
   elements.messageInput.placeholder = DEFAULT_MESSAGE_PLACEHOLDER;
   elements.attachmentPreview.classList.add("hidden");
@@ -630,7 +630,9 @@ async function sendMessage() {
   const typedText = elements.messageInput.value.trim();
   const attachment = state.attachment;
   if (state.running || (!typedText && !attachment)) return;
-  const messageText = typedText || "请阅读这份文件，并告诉我你能提供哪些帮助。";
+  const messageText = typedText
+    || state.attachmentQuestionSuggestion
+    || "请阅读这份文件，并告诉我你能提供哪些帮助。";
   state.running = true;
   state.openedTasksForRun = false;
   state.taskProgress = {};
@@ -747,7 +749,7 @@ function newChat() {
   state.tasks = [];
   state.taskProgress = {};
   state.attachment = null;
-  state.hasAttachmentQuestionSuggestion = false;
+  state.attachmentQuestionSuggestion = null;
   state.taskDrawerOpen = false;
   elements.messages.innerHTML = "";
   elements.messages.classList.add("hidden");
@@ -765,8 +767,8 @@ function newChat() {
 
 function bindEvents() {
   elements.messageInput.addEventListener("input", () => {
-    if (state.hasAttachmentQuestionSuggestion && elements.messageInput.value) {
-      state.hasAttachmentQuestionSuggestion = false;
+    if (state.attachmentQuestionSuggestion && elements.messageInput.value) {
+      state.attachmentQuestionSuggestion = null;
       elements.messageInput.placeholder = DEFAULT_MESSAGE_PLACEHOLDER;
     }
     resizeComposer();
