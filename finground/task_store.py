@@ -152,7 +152,10 @@ class TaskGetTool(_TaskTool):
         super().__init__(name="TaskGet", description="Retrieve one task by ID.")
 
     async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> dict[str, Any]:
-        task = _load_tasks(tool_context).get(args["taskId"])
+        task_id = args.get("taskId")
+        if not isinstance(task_id, str) or not task_id:
+            return {"task": None, "error": "missing required argument: taskId"}
+        task = _load_tasks(tool_context).get(task_id)
         return {"task": _task_get_output(task) if task is not None else None}
 
 
@@ -234,11 +237,21 @@ class TaskUpdateTool(_TaskTool):
     }
 
     def __init__(self) -> None:
-        super().__init__(name="TaskUpdate", description="Update an existing task.")
+        super().__init__(
+            name="TaskUpdate",
+            description="Update an existing task. Always include its required taskId.",
+        )
 
     async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> dict[str, Any]:
         tasks = _load_tasks(tool_context)
-        task_id = args["taskId"]
+        task_id = args.get("taskId")
+        if not isinstance(task_id, str) or not task_id:
+            return {
+                "success": False,
+                "taskId": None,
+                "updatedFields": [],
+                "error": "missing required argument: taskId",
+            }
         task = tasks.get(task_id)
         if task is None:
             return {

@@ -123,6 +123,20 @@ class EmptyWorkerResultLlm(BaseLlm):
         )
 
 
+class AlwaysMalformedWorkerLlm(BaseLlm):
+    attempts: ClassVar[int] = 0
+
+    async def generate_content_async(
+        self,
+        llm_request: LlmRequest,
+        stream: bool = False,
+    ) -> AsyncGenerator[LlmResponse]:
+        del llm_request, stream
+        type(self).attempts += 1
+        raise json.JSONDecodeError("Unterminated string", '"broken', 0)
+        yield
+
+
 class MalformedRootToolCallLlm(BaseLlm):
     attempts: ClassVar[int] = 0
 
@@ -689,7 +703,12 @@ def test_dispatcher_retries_and_isolates_one_worker_failure() -> None:
         "kpi_key": "capex",
         "status": "failed",
         "result": None,
-        "error": "JSONDecodeError: Unterminated string: line 1 column 1 (char 0)",
+        "error": (
+            "KPI worker did not return a valid structured response after 3 attempts. "
+            "Retry only this KPI and keep successful sibling results."
+        ),
+        "error_code": "worker_invalid_json",
+        "retryable": True,
     }
 
 
@@ -748,9 +767,73 @@ def test_dispatcher_converts_missing_worker_result_to_failed_outcome() -> None:
             "kpi_key": "revenue",
             "status": "failed",
             "result": None,
-            "error": "WorkerResultError: kpi_worker returned no task result",
+            "error": (
+                "KPI worker returned an incomplete or invalid structured result. Retry only this "
+                "KPI and keep successful sibling results."
+            ),
+            "error_code": "worker_invalid_result",
+            "retryable": True,
         }
     ]
+
+
+def test_report_qa_dispatcher_hides_exhausted_json_parser_error() -> None:
+    async def run() -> dict:
+        AlwaysMalformedWorkerLlm.attempts = 0
+        worker = create_report_qa_worker()
+        worker.model = AlwaysMalformedWorkerLlm(model="malformed-report-qa-worker")
+        dispatcher = create_root_agent(report_qa_worker=worker).tools[-1]
+        root = create_root_agent(report_qa_worker=worker)
+        root.model = ScriptedLlm(
+            model="root-script",
+            responses=[
+                _tool_call(
+                    REPORT_QA_DISPATCHER_NAME,
+                    {
+                        "task_id": "1",
+                        "report_ref": "ACME_2025",
+                        "question": "What changed?",
+                    },
+                ),
+                types.Content(role="model", parts=[types.Part.from_text(text="Handled.")]),
+            ],
+        )
+        del dispatcher
+        app = App(name="report_qa_json_failure_test", root_agent=root)
+        sessions = InMemorySessionService()
+        await sessions.create_session(
+            app_name=app.name,
+            user_id="user",
+            session_id="session",
+        )
+        runner = Runner(app=app, session_service=sessions)
+        events = [
+            event
+            async for event in runner.run_async(
+                user_id="user",
+                session_id="session",
+                new_message=types.Content(
+                    role="user", parts=[types.Part.from_text(text="What changed?")]
+                ),
+            )
+        ]
+        return next(
+            event.output
+            for event in reversed(events)
+            if event.author == REPORT_QA_DISPATCHER_NAME and isinstance(event.output, dict)
+        )
+
+    outcome = asyncio.run(run())
+
+    assert AlwaysMalformedWorkerLlm.attempts == 3
+    assert outcome == {
+        "task_id": "1",
+        "status": "failed",
+        "result": None,
+        "error": "Report QA worker did not return a valid structured response after 3 attempts.",
+        "error_code": "worker_invalid_json",
+        "retryable": True,
+    }
 
 
 def test_root_retries_malformed_tool_call_json() -> None:

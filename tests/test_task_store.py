@@ -121,3 +121,32 @@ def test_unknown_task_returns_null_or_error_without_mutation() -> None:
         "error": "unknown task",
     }
     assert context.state == {}
+
+
+def test_update_missing_task_id_returns_recoverable_error_without_mutation() -> None:
+    context = SimpleNamespace(state={})
+    _create(context)
+    before = deepcopy(context.state)
+
+    failed = _call(
+        task_update,
+        {"status": "completed", "metadata": {"result": {"status": "answered"}}},
+        context,
+    )
+
+    assert failed == {
+        "success": False,
+        "taskId": None,
+        "updatedFields": [],
+        "error": "missing required argument: taskId",
+    }
+    assert context.state == before
+
+
+def test_get_missing_task_id_returns_recoverable_error() -> None:
+    context = SimpleNamespace(state={})
+
+    assert _call(task_get, {}, context) == {
+        "task": None,
+        "error": "missing required argument: taskId",
+    }

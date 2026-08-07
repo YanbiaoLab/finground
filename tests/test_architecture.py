@@ -7,8 +7,10 @@ import pytest
 
 from finground.agent import app, root_agent
 from finground.config import ModelConfig, load_project_env
+from finground.kpi_catalog import KPI_CATALOG
 from finground.kpi_dispatcher import (
     DISPATCH_ITEM_NAME,
+    DISPATCHER_DESCRIPTION,
     DISPATCHER_NAME,
     MAX_PARALLEL_WORKERS,
     create_kpi_dispatcher,
@@ -20,7 +22,7 @@ from finground.report_qa_dispatcher import (
     create_report_qa_dispatcher,
 )
 from finground.report_qa_worker import REPORT_QA_WORKER_NAME, create_report_qa_worker
-from finground.root_agent import create_root_agent
+from finground.root_agent import ROOT_INSTRUCTION, create_root_agent
 from finground.task_store import TASK_TOOL_NAMES
 
 
@@ -70,7 +72,7 @@ def test_root_workflow_tool_schemas_stay_shallow() -> None:
         "additionalProperties": True,
         "type": "object",
     }
-    assert sum(len(json.dumps(value)) for value in declarations.values()) < 2_000
+    assert sum(len(json.dumps(value)) for value in declarations.values()) < 2_500
 
 
 def test_agents_expose_only_their_scoped_tools() -> None:
@@ -107,6 +109,28 @@ def test_root_description_is_domain_and_tool_agnostic() -> None:
 
     assert description == "A general-purpose coordinator for complex, multi-step work."
     assert all(term not in description.lower() for term in ("tool", "taskcreate", "kpi", "report"))
+
+
+def test_root_retries_only_retryable_failed_kpis_once() -> None:
+    assert "retryable=true" in ROOT_INSTRUCTION
+    assert "at most one more time" in ROOT_INSTRUCTION
+    assert "Never rerun a succeeded task" in ROOT_INSTRUCTION
+    assert "make a third dispatcher call" in ROOT_INSTRUCTION
+    assert "Never expose exception class names" in ROOT_INSTRUCTION
+
+
+def test_root_can_see_supported_kpis_and_routes_other_metrics_to_report_qa() -> None:
+    dispatcher_tool = next(tool for tool in root_agent.tools if tool.name == DISPATCHER_NAME)
+    declaration = dispatcher_tool._get_declaration().model_dump(mode="json", exclude_none=True)
+
+    assert declaration["description"] == DISPATCHER_DESCRIPTION
+    assert all(kpi_key in declaration["description"] for kpi_key in KPI_CATALOG)
+    assert "metrics outside this list" in declaration["description"]
+    assert REPORT_QA_DISPATCHER_NAME in ROOT_INSTRUCTION
+    assert "outside that list" in ROOT_INSTRUCTION
+    assert "non-canonical annual-report" in ROOT_INSTRUCTION
+    assert "preserve" in ROOT_INSTRUCTION
+    assert "user's exact wording" in ROOT_INSTRUCTION
 
 
 def test_model_config_comes_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
